@@ -1,0 +1,37 @@
+{
+  "challenge_module": "Nayutar.Statements",
+  "solution_module": "Nayutar.Proofs",
+  "theorem_names": [
+    "Nayutar.Fixture.Register.step_revision_monotone",
+    "Nayutar.Fixture.Register.step_rejected_unchanged",
+    "Nayutar.Fixture.Register.step_accepted_bumps",
+    "Nayutar.WatchCache.watch_no_loss",
+    "Nayutar.WatchCache.watch_no_duplicates",
+    "Nayutar.WatchCache.watch_order_preserved",
+    "Nayutar.WatchCache.bookmark_monotone",
+    "Nayutar.Liveness.notready_needs_quorum_and_failed_probes",
+    "Nayutar.Liveness.suspected_tick_marks_rounds",
+    "Nayutar.Liveness.evictable_needs_grace",
+    "Nayutar.Liveness.notready_observation_restarts_grace",
+    "Nayutar.Liveness.heartbeat_ends_round",
+    "Nayutar.Liveness.ok_probe_ends_round",
+    "Nayutar.Liveness.alive_vote_ends_round",
+    "Nayutar.Liveness.round_evidence_is_sound",
+    "Nayutar.Liveness.budget_grant_is_bounded",
+    "Nayutar.Envelope.create_is_stored",
+    "Nayutar.Envelope.create_starts_at_generation_one",
+    "Nayutar.Envelope.update_is_stored",
+    "Nayutar.Envelope.update_keeps_uid_and_status",
+    "Nayutar.Envelope.update_bumps_generation_iff_spec_changes",
+    "Nayutar.Envelope.update_status_is_stored",
+    "Nayutar.Envelope.update_status_keeps_meta_and_spec",
+    "Nayutar.Envelope.update_status_observed_is_monotone",
+    "Nayutar.Envelope.update_status_since_follows_state",
+    "Nayutar.Envelope.stale_revision_is_rejected"
+  ],
+  "permitted_axioms": [
+    "propext",
+    "Quot.sound",
+    "Classical.choice"
+  ]
+}

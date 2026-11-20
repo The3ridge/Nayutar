@@ -1,0 +1,17 @@
+# Personal MCP client settings
+/.mcp.json
+/.codex/*
+!/.codex/hooks.json
+/.claude/settings.local.json
+
+# Internal notes (drafts, handoffs, feedback)
+docs/internal/
+
+.serena/
+__pycache__/
+
+# Lean build output
+**/.lake/
+
+# Agent worktrees
+/.claude/worktrees/

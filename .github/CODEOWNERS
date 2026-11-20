@@ -1,0 +1,13 @@
+# These paths decide what the verification gate means: the specifications,
+# the CI workflows, the agent guards and the theorem-statement guard.
+# Changes to them need review from the owner.
+/spec/ @Kaikei-e
+/.github/ @Kaikei-e
+/scripts/agent-harness/ @Kaikei-e
+/.claude/settings.json @Kaikei-e
+/.codex/hooks.json @Kaikei-e
+/cmd/check-protected-theorems/ @Kaikei-e
+/core/theoremguard.go @Kaikei-e
+/core/theoremguard_test.go @Kaikei-e
+/core/ci_test.go @Kaikei-e
+/scripts/tests/ @Kaikei-e

@@ -1,0 +1,33 @@
+# Dependabot version updates for the Go module and the GitHub Actions in this repository.
+#
+# Dependabot alerts and security updates are repository settings, not configured by this file;
+# the cooldown below applies to version updates only.
+# A Go module update that needs a newer Go release would raise the `go` directive in go.mod, which
+# the tests reject on purpose (the floor is a recorded decision), so such a pull request is expected
+# to fail until the floor is revisited.
+#
+# Not covered by Dependabot here, so they must be bumped by hand:
+#   - the checksum-pinned binaries downloaded in the workflows (etcd, zizmor, elan)
+#   - the `go install ...@version` tool pins in the workflows
+#   - the Lean toolchain and the Lake dependency in spec/
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"

@@ -1,0 +1,268 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  workflow-security:
+    name: Workflow Security (zizmor)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install and run zizmor
+        env:
+          ZIZMOR_VERSION: v1.31.1
+          ZIZMOR_SHA256: d185f726bdaf92df78273217dfdd24ebcd6b0ef48cf3ce776ff5762b6e138c99
+        run: |
+          set -euo pipefail
+          archive="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+            -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/zizmorcore/zizmor/releases/download/${ZIZMOR_VERSION}/${archive}"
+          echo "${ZIZMOR_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}"
+          "${RUNNER_TEMP}/zizmor" --pedantic --strict-collection --offline .
+
+  decisions:
+    name: Decision records (docdag)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Install docdag
+        run: go install github.com/Kaikei-e/DocDag/cmd/docdag@v0.6.0
+
+      - name: Validate and lint the ADR graph
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            docdag validate --format github --immutable-since "origin/${GITHUB_BASE_REF}"
+          elif [ "${EVENT_NAME}" = "push" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ] && git rev-parse --verify --quiet "${BEFORE_SHA}^{commit}" >/dev/null; then
+            docdag validate --format github --immutable-since "${BEFORE_SHA}"
+          else
+            docdag validate --format github
+          fi
+          docdag lint --strict
+
+  agent-harness:
+    name: Agent harness (guards and self-check)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run agent harness tests
+        run: python3 scripts/tests/test-agent-harness.py
+
+      - name: Run agent harness self-check
+        run: python3 scripts/agent-harness/harness_selfcheck.py
+
+  lkal:
+    name: LKAL documents (lkal)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Install lkal
+        run: go install github.com/Kaikei-e/LKAL/cmd/lkal@v0.0.0-20261114132324-790bdd412dd7
+
+      - name: Check and format-check every .lkal file
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.lkal')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no .lkal files"
+            exit 0
+          fi
+          lkal check "${files[@]}"
+          unformatted=$(lkal fmt -l "${files[@]}")
+          if [ -n "${unformatted}" ]; then
+            printf 'not in canonical form (run lkal fmt -w):\n%s\n' "${unformatted}"
+            exit 1
+          fi
+
+      - name: Decode the development etcd declaration
+        env:
+          NAYUTAR_REQUIRE_LKAL: "1"
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run '^TestDevDeclarationDecodes$' ./cmd/dev-etcd | tee "${RUNNER_TEMP}/dev-declaration.log"
+          grep -q '^--- PASS: TestDevDeclarationDecodes' "${RUNNER_TEMP}/dev-declaration.log"
+
+  go:
+    name: Go core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.27.3 is the floor. "1.27" tracks the newest patch of that major.
+        # Add a newer major while it is still inside Go's two-release support
+        # window and at least 1.27.3, and drop a major once it falls out.
+        go-version:
+          - "1.27.3"
+          - "1.27"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: false
+
+      - name: Check gofmt
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.go')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no .go files"
+            exit 1
+          fi
+          unformatted="$(gofmt -l "${files[@]}")"
+          if [ -n "${unformatted}" ]; then
+            printf 'not gofmt-clean:\n%s\n' "${unformatted}"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test with race detector
+        run: go test -race ./...
+
+  store-etcd:
+    name: Store contract on etcd
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Vet store, liveness and resource packages with etcd tag
+        run: go vet -tags etcd ./core/store/... ./core/liveness/... ./core/resource/...
+
+      - name: Install etcd
+        env:
+          ETCD_VERSION: v3.6.16
+          ETCD_SHA256: c8c0d96d8292ef085deabbf735e9561d3d396768e4d606df005aa25964f21911
+        run: |
+          set -euo pipefail
+          archive="etcd-${ETCD_VERSION}-linux-amd64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+            -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/${archive}"
+          echo "${ETCD_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/etcd"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/etcd" --strip-components=1
+          "${RUNNER_TEMP}/etcd/etcd" --version
+
+      - name: Run the store contract, linearizability checks, node registry and resource objects against etcd
+        env:
+          NAYUTAR_ETCD_BIN: ${{ runner.temp }}/etcd/etcd
+        run: go test -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/
+
+      - name: Run the store contract, linearizability checks, node registry and resource objects against etcd with race detector
+        env:
+          NAYUTAR_ETCD_BIN: ${{ runner.temp }}/etcd/etcd
+        run: go test -race -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/
+
+  vulncheck:
+    name: Vulnerability scan (govulncheck)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Standard-library findings are fixed by the toolchain, not by go.mod, so scan with the newest 1.27 patch release.
+          go-version: "1.27"
+          check-latest: true
+          cache: false
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+
+      # govulncheck fails the job only for vulnerabilities reachable from this module's code (default symbol-level scan); uncalled module-level findings are printed but do not fail.
+      - name: Scan the module and its tests
+        run: govulncheck -test ./...
+
+      - name: Scan the module and its tests with the drt and etcd build tags
+        run: govulncheck -test -tags drt,etcd ./...

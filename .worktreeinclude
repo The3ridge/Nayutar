@@ -1,0 +1,5 @@
+# Personal MCP client settings are gitignored, so a fresh worktree starts without
+# the antigravity and kisage servers. Claude Code copies these paths into every
+# worktree it creates.
+.mcp.json
+.claude/settings.local.json
