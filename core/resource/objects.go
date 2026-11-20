@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"time"
 
 	"github.com/Kaikei-e/LKAL"
 	"github.com/Kaikei-e/Nayutar/core/resource/envelope"
+	"github.com/Kaikei-e/Nayutar/core/resource/refs"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 	"github.com/Kaikei-e/Nayutar/core/store/tenant"
@@ -24,20 +26,30 @@ var (
 	ErrCorrupt = errors.New("resource: stored value is not a valid envelope")
 )
 
-const placeholderTenant = "t"
+const (
+	placeholderTenant  = "t"
+	deleteBackRefBatch = 64
+)
 
-// Config configures clock and randomness sources for an Objects handle.
+// Config configures clock, randomness, tenant identity, reference schema, and authorization for an Objects handle.
 // Rand is read from every goroutine that calls Create and must be safe for concurrent use (crypto/rand.Reader is).
 type Config struct {
-	Now  func() time.Time // defaults to time.Now
-	Rand io.Reader        // defaults to crypto/rand.Reader
+	Now        func() time.Time // defaults to time.Now
+	Rand       io.Reader        // defaults to crypto/rand.Reader
+	Tenant     string
+	References refs.Schema
+	Authorizer refs.Authorizer
 }
 
 // Objects reads and writes envelopes under the object keys of one tenant view.
 type Objects struct {
-	st   tenant.Store
-	now  func() time.Time
-	rand io.Reader
+	st         tenant.Store
+	now        func() time.Time
+	rand       io.Reader
+	tenant     string
+	references refs.Schema
+	schemaErr  error
+	authorizer refs.Authorizer
 }
 
 // NewObjects binds a tenant-scoped store (a tenant view or a registry view; keys are tenant-relative).
@@ -51,9 +63,13 @@ func NewObjects(st tenant.Store, cfg Config) *Objects {
 		randReader = rand.Reader
 	}
 	return &Objects{
-		st:   st,
-		now:  nowFn,
-		rand: randReader,
+		st:         st,
+		now:        nowFn,
+		rand:       randReader,
+		tenant:     cfg.Tenant,
+		references: cfg.References,
+		schemaErr:  cfg.References.Validate(),
+		authorizer: cfg.Authorizer,
 	}
 }
 
@@ -62,6 +78,15 @@ func objectKey(obj keyspace.Object) (string, error) {
 		Family: keyspace.FamilyObject,
 		Tenant: placeholderTenant,
 		Object: obj,
+	}).Rel()
+}
+
+func backRefKey(target, source keyspace.Object) (string, error) {
+	return (keyspace.Key{
+		Family: keyspace.FamilyBackRef,
+		Tenant: placeholderTenant,
+		Object: target,
+		Source: source,
 	}).Rel()
 }
 
@@ -75,6 +100,21 @@ func newUUIDv4(r io.Reader) (string, error) {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
+func decodeStored(obj keyspace.Object, key string, value []byte) (lkal.Record, error) {
+	doc, err := Decode(value)
+	if err != nil {
+		return lkal.Record{}, fmt.Errorf("%w: %s: %v", ErrCorrupt, key, err)
+	}
+	if err := envelope.CheckStored(doc); err != nil {
+		return lkal.Record{}, fmt.Errorf("%w: %s: %v", ErrCorrupt, key, err)
+	}
+	gotObj, err := envelope.Object(doc)
+	if err != nil || gotObj != obj {
+		return lkal.Record{}, fmt.Errorf("%w: %s: stored identity %v does not match key", ErrCorrupt, key, gotObj)
+	}
+	return doc, nil
+}
+
 func (o *Objects) readStored(ctx context.Context, obj keyspace.Object, key string) (lkal.Record, store.Rev, error) {
 	kv, _, err := o.st.Get(ctx, key, 0)
 	if err != nil {
@@ -83,16 +123,9 @@ func (o *Objects) readStored(ctx context.Context, obj keyspace.Object, key strin
 		}
 		return lkal.Record{}, 0, fmt.Errorf("get %s: %w", key, err)
 	}
-	doc, err := Decode(kv.Value)
+	doc, err := decodeStored(obj, key, kv.Value)
 	if err != nil {
-		return lkal.Record{}, 0, fmt.Errorf("%w: %s: %v", ErrCorrupt, key, err)
-	}
-	if err := envelope.CheckStored(doc); err != nil {
-		return lkal.Record{}, 0, fmt.Errorf("%w: %s: %v", ErrCorrupt, key, err)
-	}
-	gotObj, err := envelope.Object(doc)
-	if err != nil || gotObj != obj {
-		return lkal.Record{}, 0, fmt.Errorf("%w: %s: stored identity %v does not match key", ErrCorrupt, key, gotObj)
+		return lkal.Record{}, 0, err
 	}
 	return doc, kv.ModRev, nil
 }
@@ -109,8 +142,218 @@ func canonicalize(candidate lkal.Record) (lkal.Record, error) {
 	return canonical, nil
 }
 
-// Create validates candidate, assigns a version-4 UUID and generation 1, and stores it if absent.
-func (o *Objects) Create(ctx context.Context, candidate lkal.Record) (lkal.Record, error) {
+type targetState uint8
+
+const (
+	targetAbsent targetState = iota
+	targetPresent
+	targetUnreadable
+)
+
+type targetInfo struct {
+	key    string
+	state  targetState
+	modRev store.Rev
+	labels map[string]string
+	err    error
+}
+
+type authCacheKey struct {
+	path   string
+	target keyspace.Object
+}
+
+func extractLabels(doc lkal.Record) map[string]string {
+	labels := make(map[string]string)
+	for _, f := range doc.Fields {
+		if f.Key != "meta" {
+			continue
+		}
+		meta, ok := f.Value.(lkal.Record)
+		if !ok {
+			return labels
+		}
+		for _, mf := range meta.Fields {
+			if mf.Key != "labels" {
+				continue
+			}
+			lrec, ok := mf.Value.(lkal.Record)
+			if !ok {
+				return labels
+			}
+			for _, lf := range lrec.Fields {
+				if s, ok := lf.Value.(lkal.String); ok {
+					labels[lf.Key] = string(s)
+				}
+			}
+			return labels
+		}
+		return labels
+	}
+	return labels
+}
+
+func (o *Objects) readTargets(ctx context.Context, targets []keyspace.Object) (map[keyspace.Object]targetInfo, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	infos := make(map[keyspace.Object]targetInfo, len(targets))
+	for _, target := range targets {
+		key, err := objectKey(target)
+		if err != nil {
+			return nil, err
+		}
+		kv, _, err := o.st.Get(ctx, key, 0)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				infos[target] = targetInfo{key: key, state: targetAbsent}
+				continue
+			}
+			return nil, fmt.Errorf("get target %s: %w", key, err)
+		}
+		doc, err := decodeStored(target, key, kv.Value)
+		if err != nil {
+			infos[target] = targetInfo{key: key, state: targetUnreadable, modRev: kv.ModRev, err: err}
+			continue
+		}
+		infos[target] = targetInfo{
+			key:    key,
+			state:  targetPresent,
+			modRev: kv.ModRev,
+			labels: extractLabels(doc),
+		}
+	}
+	return infos, nil
+}
+
+func (o *Objects) checkRefs(
+	ctx context.Context,
+	source keyspace.Object,
+	principal refs.Principal,
+	stored lkal.Record,
+	hasStored bool,
+	next lkal.Record,
+) (refs.Delta, map[keyspace.Object]targetInfo, error) {
+	if o.schemaErr != nil {
+		return refs.Delta{}, nil, &refs.Error{
+			Kind:   refs.ErrInternal,
+			Detail: o.schemaErr.Error(),
+		}
+	}
+	plan, err := refs.Prepare(refs.Input{
+		Source:    source,
+		Schema:    o.references,
+		Stored:    stored,
+		HasStored: hasStored,
+		Next:      next,
+	})
+	if err != nil {
+		return refs.Delta{}, nil, err
+	}
+	if o.authorizer != nil && len(plan.Added) > 0 {
+		if err := keyspace.ValidateTenant(o.tenant); err != nil {
+			return refs.Delta{}, nil, &refs.Error{
+				Kind:   refs.ErrInternal,
+				Detail: fmt.Sprintf("invalid tenant %q: %v", o.tenant, err),
+			}
+		}
+	}
+	infos, err := o.readTargets(ctx, plan.Targets)
+	if err != nil {
+		return refs.Delta{}, nil, err
+	}
+
+	authCache := make(map[authCacheKey]bool)
+	authorize := func(occ refs.Occurrence) bool {
+		if o.authorizer == nil || principal.Type == "" || principal.ID == "" {
+			return false
+		}
+		parsed, err := refs.Parse(occ.Ref)
+		if err != nil {
+			return false
+		}
+		ck := authCacheKey{path: occ.Path, target: parsed.Object}
+		if allowed, cached := authCache[ck]; cached {
+			return allowed
+		}
+		info := infos[parsed.Object]
+		targetExists := info.state == targetPresent
+		var targetLabels map[string]string
+		if targetExists {
+			targetLabels = maps.Clone(info.labels)
+		}
+		allowed := o.authorizer.Authorize(refs.Request{
+			Tenant:       o.tenant,
+			Principal:    principal,
+			Source:       source,
+			SourcePath:   occ.Path,
+			Target:       parsed.Object,
+			TargetLabels: targetLabels,
+			TargetExists: targetExists,
+		})
+		authCache[ck] = allowed
+		return allowed
+	}
+
+	exists := func(obj keyspace.Object) bool {
+		info := infos[obj]
+		return info.state == targetPresent || info.state == targetUnreadable
+	}
+
+	delta, err := plan.Check(authorize, exists)
+	if err != nil {
+		return refs.Delta{}, nil, err
+	}
+	for _, target := range delta.Compare {
+		if info := infos[target]; info.state == targetUnreadable {
+			return refs.Delta{}, nil, &refs.Error{
+				Kind:   refs.ErrInternal,
+				Detail: fmt.Sprintf("unreadable target %s: %v", info.key, info.err),
+			}
+		}
+	}
+	return delta, infos, nil
+}
+
+func buildWriteTxn(
+	key string,
+	val []byte,
+	baseCmp store.Cmp,
+	source keyspace.Object,
+	delta refs.Delta,
+	infos map[keyspace.Object]targetInfo,
+) ([]store.Cmp, []store.Op, error) {
+	cmps := make([]store.Cmp, 0, 1+len(delta.Compare))
+	cmps = append(cmps, baseCmp)
+	for _, target := range delta.Compare {
+		if target == source {
+			continue
+		}
+		info := infos[target]
+		cmps = append(cmps, store.Cmp{Key: info.key, Op: store.CmpEqual, ModRev: info.modRev})
+	}
+
+	ops := make([]store.Op, 0, 1+len(delta.Put)+len(delta.Delete))
+	ops = append(ops, store.Op{Type: store.OpPut, Key: key, Value: val})
+	for _, target := range delta.Put {
+		brKey, err := backRefKey(target, source)
+		if err != nil {
+			return nil, nil, err
+		}
+		ops = append(ops, store.Op{Type: store.OpPut, Key: brKey, Value: []byte{}})
+	}
+	for _, target := range delta.Delete {
+		brKey, err := backRefKey(target, source)
+		if err != nil {
+			return nil, nil, err
+		}
+		ops = append(ops, store.Op{Type: store.OpDelete, Key: brKey})
+	}
+	return cmps, ops, nil
+}
+
+// Create validates candidate, checks references, assigns a version-4 UUID and generation 1, and stores it if absent.
+func (o *Objects) Create(ctx context.Context, principal refs.Principal, candidate lkal.Record) (lkal.Record, error) {
 	obj, err := envelope.Object(candidate)
 	if err != nil {
 		return lkal.Record{}, err
@@ -131,18 +374,31 @@ func (o *Objects) Create(ctx context.Context, candidate lkal.Record) (lkal.Recor
 	if err != nil {
 		return lkal.Record{}, err
 	}
+	delta, infos, err := o.checkRefs(ctx, obj, principal, lkal.Record{}, false, doc)
+	if err != nil {
+		return lkal.Record{}, err
+	}
 	val, err := Encode(doc)
 	if err != nil {
 		return lkal.Record{}, err
 	}
-	ok, rev, err := o.st.Txn(ctx,
-		[]store.Cmp{{Key: key, Op: store.CmpEqual, ModRev: 0}},
-		[]store.Op{{Type: store.OpPut, Key: key, Value: val}},
-	)
+	cmps, ops, err := buildWriteTxn(key, val, store.Cmp{Key: key, Op: store.CmpEqual, ModRev: 0}, obj, delta, infos)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	ok, rev, err := o.st.Txn(ctx, cmps, ops)
 	if err != nil {
 		return lkal.Record{}, fmt.Errorf("create %s: %w", key, err)
 	}
 	if !ok {
+		if len(cmps) > 1 {
+			if _, _, getErr := o.st.Get(ctx, key, 0); getErr != nil {
+				if errors.Is(getErr, store.ErrNotFound) {
+					return lkal.Record{}, &envelope.Error{Kind: envelope.ErrConflict, Path: "meta/revision", Detail: "concurrent modification"}
+				}
+				return lkal.Record{}, fmt.Errorf("create %s: %w", key, getErr)
+			}
+		}
 		return lkal.Record{}, fmt.Errorf("%w: %s", ErrExists, key)
 	}
 	return envelope.WithRevision(doc, int64(rev)), nil
@@ -162,19 +418,20 @@ func (o *Objects) Get(ctx context.Context, obj keyspace.Object) (lkal.Record, er
 }
 
 // Update validates and applies a spec or labels change to an existing object using optimistic concurrency.
-func (o *Objects) Update(ctx context.Context, candidate lkal.Record) (lkal.Record, error) {
-	return o.applyUpdate(ctx, candidate, envelope.Update)
+func (o *Objects) Update(ctx context.Context, principal refs.Principal, candidate lkal.Record) (lkal.Record, error) {
+	return o.applyUpdate(ctx, principal, candidate, envelope.Update)
 }
 
 // UpdateStatus validates and applies a status change to an existing object using optimistic concurrency.
 func (o *Objects) UpdateStatus(ctx context.Context, candidate lkal.Record) (lkal.Record, error) {
-	return o.applyUpdate(ctx, candidate, func(old lkal.Record, modRev int64, canonical lkal.Record) (lkal.Record, error) {
+	return o.applyUpdate(ctx, refs.Principal{}, candidate, func(old lkal.Record, modRev int64, canonical lkal.Record) (lkal.Record, error) {
 		return envelope.UpdateStatus(old, modRev, canonical, envelope.Timestamp(o.now()))
 	})
 }
 
 func (o *Objects) applyUpdate(
 	ctx context.Context,
+	principal refs.Principal,
 	candidate lkal.Record,
 	transition func(old lkal.Record, modRev int64, canonical lkal.Record) (lkal.Record, error),
 ) (lkal.Record, error) {
@@ -198,6 +455,10 @@ func (o *Objects) applyUpdate(
 	if err != nil {
 		return lkal.Record{}, err
 	}
+	delta, infos, err := o.checkRefs(ctx, obj, principal, old, true, next)
+	if err != nil {
+		return lkal.Record{}, err
+	}
 	if lkal.Equal(next, old) {
 		return envelope.WithRevision(old, int64(modRev)), nil
 	}
@@ -205,10 +466,11 @@ func (o *Objects) applyUpdate(
 	if err != nil {
 		return lkal.Record{}, err
 	}
-	ok, newRev, err := o.st.Txn(ctx,
-		[]store.Cmp{{Key: key, Op: store.CmpEqual, ModRev: modRev}},
-		[]store.Op{{Type: store.OpPut, Key: key, Value: val}},
-	)
+	cmps, ops, err := buildWriteTxn(key, val, store.Cmp{Key: key, Op: store.CmpEqual, ModRev: modRev}, obj, delta, infos)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	ok, newRev, err := o.st.Txn(ctx, cmps, ops)
 	if err != nil {
 		return lkal.Record{}, fmt.Errorf("update %s: %w", key, err)
 	}
@@ -218,8 +480,8 @@ func (o *Objects) applyUpdate(
 	return envelope.WithRevision(next, int64(newRev)), nil
 }
 
-// Delete removes obj from the store, requiring its current mod revision to equal rev when rev != 0.
-// It reads the key without decoding its value so corrupt entries can still be removed.
+// Delete removes obj and its back-reference keys from the store, requiring its current mod revision to equal rev when rev != 0.
+// Unreadable stored values or invalid reference metadata fall back to scanning the tenant back-reference area.
 func (o *Objects) Delete(ctx context.Context, obj keyspace.Object, rev int64) error {
 	key, err := objectKey(obj)
 	if err != nil {
@@ -235,10 +497,83 @@ func (o *Objects) Delete(ctx context.Context, obj keyspace.Object, rev int64) er
 	if rev != 0 && rev != int64(kv.ModRev) {
 		return &envelope.Error{Kind: envelope.ErrConflict, Path: "meta/revision", Detail: "revision mismatch"}
 	}
-	ok, _, err := o.st.Txn(ctx,
-		[]store.Cmp{{Key: key, Op: store.CmpEqual, ModRev: kv.ModRev}},
-		[]store.Op{{Type: store.OpDelete, Key: key}},
-	)
+	bodyCmp := store.Cmp{Key: key, Op: store.CmpEqual, ModRev: kv.ModRev}
+
+	if stored, err := decodeStored(obj, key, kv.Value); err == nil {
+		if delta, err := refs.DeleteDelta(stored); err == nil {
+			return o.deleteWithDelta(ctx, obj, key, bodyCmp, delta)
+		}
+	}
+	return o.deleteScanningBackRefs(ctx, obj, key, bodyCmp)
+}
+
+func (o *Objects) deleteWithDelta(ctx context.Context, obj keyspace.Object, key string, bodyCmp store.Cmp, delta refs.Delta) error {
+	ops := make([]store.Op, 0, 1+len(delta.Delete))
+	ops = append(ops, store.Op{Type: store.OpDelete, Key: key})
+	for _, target := range delta.Delete {
+		brKey, err := backRefKey(target, obj)
+		if err != nil {
+			return err
+		}
+		ops = append(ops, store.Op{Type: store.OpDelete, Key: brKey})
+	}
+	ok, _, err := o.st.Txn(ctx, []store.Cmp{bodyCmp}, ops)
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", key, err)
+	}
+	if !ok {
+		return &envelope.Error{Kind: envelope.ErrConflict, Path: "meta/revision", Detail: "concurrent modification"}
+	}
+	return nil
+}
+
+func (o *Objects) deleteScanningBackRefs(ctx context.Context, obj keyspace.Object, key string, bodyCmp store.Cmp) error {
+	var refKeys []string
+	var snapRev store.Rev
+	cont := ""
+	for {
+		kvs, rev, next, err := o.st.Range(ctx, keyspace.BackRefsPrefix, snapRev, deleteBackRefBatch, cont)
+		if err != nil {
+			return fmt.Errorf("delete %s: %w", key, err)
+		}
+		if snapRev == 0 {
+			snapRev = rev
+		}
+		for _, rkv := range kvs {
+			parsed, err := keyspace.ParseRel(placeholderTenant, rkv.Key)
+			if err == nil && parsed.Family == keyspace.FamilyBackRef && parsed.Source == obj {
+				refKeys = append(refKeys, rkv.Key)
+			}
+		}
+		if next == "" {
+			break
+		}
+		cont = next
+	}
+
+	cmps := []store.Cmp{bodyCmp}
+	batchSize := deleteBackRefBatch
+	for len(refKeys) > 0 {
+		n := min(batchSize, len(refKeys))
+		ops := make([]store.Op, n)
+		for i := range n {
+			ops[i] = store.Op{Type: store.OpDelete, Key: refKeys[i]}
+		}
+		ok, _, err := o.st.Txn(ctx, cmps, ops)
+		if err != nil {
+			if errors.Is(err, store.ErrTooLarge) && n > 1 {
+				batchSize = n / 2
+				continue
+			}
+			return fmt.Errorf("delete %s: %w", key, err)
+		}
+		if !ok {
+			return &envelope.Error{Kind: envelope.ErrConflict, Path: "meta/revision", Detail: "concurrent modification"}
+		}
+		refKeys = refKeys[n:]
+	}
+
+	ok, _, err := o.st.Txn(ctx, cmps, []store.Op{{Type: store.OpDelete, Key: key}})
 	if err != nil {
 		return fmt.Errorf("delete %s: %w", key, err)
 	}

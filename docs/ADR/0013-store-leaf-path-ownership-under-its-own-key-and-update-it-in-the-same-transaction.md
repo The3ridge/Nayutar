@@ -13,7 +13,7 @@ depends-on: ["0004", "0006"]
 
 既存の kisage はローカルファイル向けであり、`provider/lock.go` が共有ストアから Resource の順に `flock(2)` を 2 つ取る排他区間内で、`intent` → `providerApply` → `validate` → `stabilize` → `commit`（および `recover`）の多段階手順を実行する（kisage の ADR 0004）。API サーバでは多テナントの並行書き込みを単一の原子的 `Txn` へ写像し直す必要があり、同時に所有権メタデータの肥大化と書き込み遅延の増加を抑えなければならない。
 
-また、`docs/research/draft_20261117_001.md` §6.6・§8.1 は本作業を「CAS 前提で Plan 定理 11 個とプロトコル不変条件 9 個を再証明する」と記していたが、kisage の Lean 実装と文書を確認したところ、単なる行単位の再証明ではなくプロトコルモデルの再構築を伴う G0 最重の検証課題であることが分かった。
+また、kisage の Lean 実装と文書（`Kisage/Theorems.lean`、`Kisage/Protocol.lean`、kisage の ADR 0004）を確認したところ、CAS 前提への移行は既存の Plan 定理 11 個とプロトコル不変条件 9 個をそのまま再証明するだけでは済まず、単一パス射影と多段階ロックを前提としたプロトコルモデル自体の再構築を伴う G0 最重の検証課題であることが分かった。
 
 ## 決定
 

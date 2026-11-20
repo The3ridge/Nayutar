@@ -14,6 +14,7 @@ import (
 	"github.com/Kaikei-e/LKAL"
 	"github.com/Kaikei-e/Nayutar/core/resource"
 	"github.com/Kaikei-e/Nayutar/core/resource/envelope"
+	"github.com/Kaikei-e/Nayutar/core/resource/refs"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 	"github.com/Kaikei-e/Nayutar/core/store/memstore"
@@ -187,7 +188,7 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 			t.Fatalf("Get(missing) = %v, want ErrNotFound", err)
 		}
 
-		created, err := objs.Create(ctx, workloadCand("web", 2, f("env", lkal.String("dev"))))
+		created, err := objs.Create(ctx, refs.Principal{}, workloadCand("web", 2, f("env", lkal.String("dev"))))
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -213,7 +214,7 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 		}
 
 		// Duplicate create -> ErrExists.
-		if _, err := objs.Create(ctx, workloadCand("web", 5)); !errors.Is(err, resource.ErrExists) {
+		if _, err := objs.Create(ctx, refs.Principal{}, workloadCand("web", 5)); !errors.Is(err, resource.ErrExists) {
 			t.Fatalf("duplicate Create = %v, want ErrExists", err)
 		}
 
@@ -222,7 +223,7 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		echoed, err := objs.Update(ctx, got)
+		echoed, err := objs.Update(ctx, refs.Principal{}, got)
 		if err != nil {
 			t.Fatalf("echo Update: %v", err)
 		}
@@ -240,7 +241,7 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 		// Labels-only change keeps generation 1 and bumps revision.
 		labelsOnly := workloadCand("web", 2, f("env", lkal.String("prod")))
 		labelsOnly = replaceMetaField(labelsOnly, "revision", lkal.Int(rev1))
-		afterLabels, err := objs.Update(ctx, labelsOnly)
+		afterLabels, err := objs.Update(ctx, refs.Principal{}, labelsOnly)
 		if err != nil {
 			t.Fatalf("labels-only Update: %v", err)
 		}
@@ -255,7 +256,7 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 
 		// Spec change bumps generation to 2 and bumps revision.
 		specChange := workloadCand("web", 4, f("env", lkal.String("prod")))
-		afterSpec, err := objs.Update(ctx, specChange)
+		afterSpec, err := objs.Update(ctx, refs.Principal{}, specChange)
 		if err != nil {
 			t.Fatalf("spec Update: %v", err)
 		}
@@ -275,7 +276,7 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 		}
 		staleCand := workloadCand("web", 99)
 		staleCand = replaceMetaField(staleCand, "revision", lkal.Int(rev1))
-		if _, err := objs.Update(ctx, staleCand); !errors.Is(err, envelope.ErrConflict) {
+		if _, err := objs.Update(ctx, refs.Principal{}, staleCand); !errors.Is(err, envelope.ErrConflict) {
 			t.Fatalf("stale Update = %v, want ErrConflict", err)
 		}
 		if curAfter, err := st.CurrentRev(ctx); err != nil || curAfter != curBefore {
@@ -284,15 +285,15 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 
 		// Forbidden uid / generation / status changes in Update.
 		badUID := replaceMetaField(afterSpec, "uid", lkal.String("00000000-0000-4000-8000-000000000000"))
-		if _, err := objs.Update(ctx, badUID); !errors.Is(err, envelope.ErrForbidden) {
+		if _, err := objs.Update(ctx, refs.Principal{}, badUID); !errors.Is(err, envelope.ErrForbidden) {
 			t.Fatalf("Update(different uid) = %v, want ErrForbidden", err)
 		}
 		badGen := replaceMetaField(afterSpec, "generation", lkal.Int(99))
-		if _, err := objs.Update(ctx, badGen); !errors.Is(err, envelope.ErrForbidden) {
+		if _, err := objs.Update(ctx, refs.Principal{}, badGen); !errors.Is(err, envelope.ErrForbidden) {
 			t.Fatalf("Update(different generation) = %v, want ErrForbidden", err)
 		}
 		badStatus := rec(append(slices.Clone(afterSpec.Fields), f("status", rec(f("phase", lkal.String("Bad")))))...)
-		if _, err := objs.Update(ctx, badStatus); !errors.Is(err, envelope.ErrForbidden) {
+		if _, err := objs.Update(ctx, refs.Principal{}, badStatus); !errors.Is(err, envelope.ErrForbidden) {
 			t.Fatalf("Update(status change) = %v, want ErrForbidden", err)
 		}
 
@@ -409,7 +410,7 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 		if _, err := objs.Get(ctx, objID); !errors.Is(err, resource.ErrNotFound) {
 			t.Fatalf("Get after Delete = %v, want ErrNotFound", err)
 		}
-		recreated, err := objs.Create(ctx, workloadCand("web", 1))
+		recreated, err := objs.Create(ctx, refs.Principal{}, workloadCand("web", 1))
 		if err != nil {
 			t.Fatalf("recreate Create: %v", err)
 		}
@@ -431,7 +432,7 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 		cfg, _ := testObjectsConfig()
 		objs := resource.NewObjects(st, cfg)
 
-		created, err := objs.Create(ctx, workloadCand("worker", 1))
+		created, err := objs.Create(ctx, refs.Principal{}, workloadCand("worker", 1))
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -450,7 +451,7 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 				<-start
 				cand := workloadCand("worker", int64(10+idx))
 				cand = replaceMetaField(cand, "revision", lkal.Int(baseRev))
-				results[idx], errs[idx] = objs.Update(ctx, cand)
+				results[idx], errs[idx] = objs.Update(ctx, refs.Principal{}, cand)
 			}(i)
 		}
 		close(start)
@@ -496,7 +497,7 @@ func TestObjectsRawBytesUIDsAndRandFailure(t *testing.T) {
 
 	// Two objects with identical fixed-byte streams still yield valid v4 UUIDs,
 	// and two sequential draws from a normal reader differ.
-	c1, err := objs.Create(ctx, workloadCand("one", 1))
+	c1, err := objs.Create(ctx, refs.Principal{}, workloadCand("one", 1))
 	if err != nil {
 		t.Fatalf("Create(one): %v", err)
 	}
@@ -528,11 +529,11 @@ func TestObjectsRawBytesUIDsAndRandFailure(t *testing.T) {
 	// Sequential draws from seqRand differ between objects.
 	cfg, _ := testObjectsConfig()
 	seqObjs := resource.NewObjects(st, cfg)
-	a, err := seqObjs.Create(ctx, workloadCand("a", 1))
+	a, err := seqObjs.Create(ctx, refs.Principal{}, workloadCand("a", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := seqObjs.Create(ctx, workloadCand("b", 1))
+	b, err := seqObjs.Create(ctx, refs.Principal{}, workloadCand("b", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +552,7 @@ func TestObjectsRawBytesUIDsAndRandFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	failObjs := resource.NewObjects(st, resource.Config{Rand: failRand{err: wantErr}})
-	if _, err := failObjs.Create(ctx, workloadCand("never", 1)); !errors.Is(err, wantErr) {
+	if _, err := failObjs.Create(ctx, refs.Principal{}, workloadCand("never", 1)); !errors.Is(err, wantErr) {
 		t.Fatalf("Create with failing Rand = %v, want %v", err, wantErr)
 	}
 	if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
@@ -560,7 +561,7 @@ func TestObjectsRawBytesUIDsAndRandFailure(t *testing.T) {
 
 	// Short Rand (EOF) also fails without writing.
 	shortObjs := resource.NewObjects(st, resource.Config{Rand: io.LimitReader(bytes.NewReader(fixedBytes), 8)})
-	if _, err := shortObjs.Create(ctx, workloadCand("short", 1)); err == nil {
+	if _, err := shortObjs.Create(ctx, refs.Principal{}, workloadCand("short", 1)); err == nil {
 		t.Fatal("Create with short Rand succeeded, want error")
 	}
 	if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
@@ -599,7 +600,7 @@ func TestObjectsCorruptAndDeleteBehavior(t *testing.T) {
 			if _, err := objs.Get(ctx, obj); !errors.Is(err, resource.ErrCorrupt) {
 				t.Fatalf("Get(corrupt) = %v, want ErrCorrupt", err)
 			}
-			if _, err := objs.Update(ctx, workloadCand("bad", 2)); !errors.Is(err, resource.ErrCorrupt) {
+			if _, err := objs.Update(ctx, refs.Principal{}, workloadCand("bad", 2)); !errors.Is(err, resource.ErrCorrupt) {
 				t.Fatalf("Update(corrupt) = %v, want ErrCorrupt", err)
 			}
 			statusCand := rec(
@@ -676,7 +677,7 @@ func TestObjectsIdentityMismatchIsCorrupt(t *testing.T) {
 			if _, err := objs.Get(ctx, targetObj); !errors.Is(err, resource.ErrCorrupt) {
 				t.Fatalf("Get(mismatch) = %v, want ErrCorrupt", err)
 			}
-			if _, err := objs.Update(ctx, workloadCand("web", 2)); !errors.Is(err, resource.ErrCorrupt) {
+			if _, err := objs.Update(ctx, refs.Principal{}, workloadCand("web", 2)); !errors.Is(err, resource.ErrCorrupt) {
 				t.Fatalf("Update(mismatch) = %v, want ErrCorrupt", err)
 			}
 			statusCand := rec(
@@ -737,7 +738,7 @@ func TestObjectsFencedTenantRegistryAndIsolation(t *testing.T) {
 	alphaObjs := resource.NewObjects(vAlpha, cfg)
 	betaObjs := resource.NewObjects(vBeta, cfg)
 
-	created, err := alphaObjs.Create(ctx, workloadCand("shared", 3))
+	created, err := alphaObjs.Create(ctx, refs.Principal{}, workloadCand("shared", 3))
 	if err != nil {
 		t.Fatalf("alpha Create: %v", err)
 	}
@@ -745,7 +746,7 @@ func TestObjectsFencedTenantRegistryAndIsolation(t *testing.T) {
 	if _, err := betaObjs.Get(ctx, obj); !errors.Is(err, resource.ErrNotFound) {
 		t.Fatalf("beta Get(alpha's object) = %v, want ErrNotFound", err)
 	}
-	if _, err := betaObjs.Create(ctx, workloadCand("shared", 7)); err != nil {
+	if _, err := betaObjs.Create(ctx, refs.Principal{}, workloadCand("shared", 7)); err != nil {
 		t.Fatalf("beta Create(same name): %v", err)
 	}
 
@@ -753,7 +754,7 @@ func TestObjectsFencedTenantRegistryAndIsolation(t *testing.T) {
 	if err := reg.Delete(ctx, "alpha"); err != nil {
 		t.Fatalf("Delete(alpha): %v", err)
 	}
-	if _, err := alphaObjs.Create(ctx, workloadCand("after-delete", 1)); !errors.Is(err, tenant.ErrFenced) {
+	if _, err := alphaObjs.Create(ctx, refs.Principal{}, workloadCand("after-delete", 1)); !errors.Is(err, tenant.ErrFenced) {
 		t.Fatalf("Create after tenant delete = %v, want tenant.ErrFenced", err)
 	}
 
@@ -766,7 +767,7 @@ func TestObjectsFencedTenantRegistryAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	alphaNewObjs := resource.NewObjects(vAlphaNew, cfg)
-	fresh, err := alphaNewObjs.Create(ctx, workloadCand("shared", 1))
+	fresh, err := alphaNewObjs.Create(ctx, refs.Principal{}, workloadCand("shared", 1))
 	if err != nil {
 		t.Fatalf("new view Create: %v", err)
 	}
@@ -775,7 +776,7 @@ func TestObjectsFencedTenantRegistryAndIsolation(t *testing.T) {
 
 	updateCand := workloadCand("shared", 9)
 	updateCand = replaceMetaField(updateCand, "revision", lkal.Int(getIntField(freshMeta, "revision")))
-	if _, err := alphaObjs.Update(ctx, updateCand); !errors.Is(err, tenant.ErrFenced) {
+	if _, err := alphaObjs.Update(ctx, refs.Principal{}, updateCand); !errors.Is(err, tenant.ErrFenced) {
 		t.Fatalf("Update on fenced view = %v, want tenant.ErrFenced", err)
 	}
 	statusCand := rec(
@@ -826,7 +827,7 @@ func TestObjectsStoreErrorsAndValidation(t *testing.T) {
 	base := memstore.New()
 	cfg, _ := testObjectsConfig()
 	seeded := resource.NewObjects(base, cfg)
-	if _, err := seeded.Create(ctx, workloadCand("item", 1)); err != nil {
+	if _, err := seeded.Create(ctx, refs.Principal{}, workloadCand("item", 1)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -838,7 +839,7 @@ func TestObjectsStoreErrorsAndValidation(t *testing.T) {
 	if _, err := errGetObjs.Get(ctx, obj); !errors.Is(err, wantGetErr) {
 		t.Errorf("Get store err = %v, want %v", err, wantGetErr)
 	}
-	if _, err := errGetObjs.Update(ctx, workloadCand("item", 2)); !errors.Is(err, wantGetErr) {
+	if _, err := errGetObjs.Update(ctx, refs.Principal{}, workloadCand("item", 2)); !errors.Is(err, wantGetErr) {
 		t.Errorf("Update store Get err = %v, want %v", err, wantGetErr)
 	}
 	if err := errGetObjs.Delete(ctx, obj, 0); !errors.Is(err, wantGetErr) {
@@ -846,10 +847,10 @@ func TestObjectsStoreErrorsAndValidation(t *testing.T) {
 	}
 
 	errTxnObjs := resource.NewObjects(&failingStore{Store: base, txnErr: wantTxnErr}, cfg)
-	if _, err := errTxnObjs.Create(ctx, workloadCand("other", 1)); !errors.Is(err, wantTxnErr) {
+	if _, err := errTxnObjs.Create(ctx, refs.Principal{}, workloadCand("other", 1)); !errors.Is(err, wantTxnErr) {
 		t.Errorf("Create store Txn err = %v, want %v", err, wantTxnErr)
 	}
-	if _, err := errTxnObjs.Update(ctx, workloadCand("item", 2)); !errors.Is(err, wantTxnErr) {
+	if _, err := errTxnObjs.Update(ctx, refs.Principal{}, workloadCand("item", 2)); !errors.Is(err, wantTxnErr) {
 		t.Errorf("Update store Txn err = %v, want %v", err, wantTxnErr)
 	}
 	if err := errTxnObjs.Delete(ctx, obj, 0); !errors.Is(err, wantTxnErr) {
@@ -864,7 +865,7 @@ func TestObjectsStoreErrorsAndValidation(t *testing.T) {
 	if err := seeded.Delete(ctx, badObj, 0); !errors.Is(err, keyspace.ErrInvalid) {
 		t.Errorf("Delete(invalid obj) = %v, want keyspace.ErrInvalid", err)
 	}
-	if _, err := seeded.Create(ctx, rec()); !errors.Is(err, envelope.ErrMalformed) {
+	if _, err := seeded.Create(ctx, refs.Principal{}, rec()); !errors.Is(err, envelope.ErrMalformed) {
 		t.Errorf("Create(malformed) = %v, want envelope.ErrMalformed", err)
 	}
 }
@@ -884,7 +885,7 @@ func TestObjectsCandidateCanonicalizationAndLKALRejection(t *testing.T) {
 		f("spec", unnormalizedSpec),
 	)
 
-	created, err := objs.Create(ctx, cand)
+	created, err := objs.Create(ctx, refs.Principal{}, cand)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -900,7 +901,7 @@ func TestObjectsCandidateCanonicalizationAndLKALRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := objs.Update(ctx, cand)
+	updated, err := objs.Update(ctx, refs.Principal{}, cand)
 	if err != nil {
 		t.Fatalf("Update(same unnormalized candidate): %v", err)
 	}
@@ -973,14 +974,14 @@ func TestObjectsCandidateCanonicalizationAndLKALRejection(t *testing.T) {
 				f("meta", rec(f("kind", lkal.String("workload")), f("name", lkal.String("bad-lkal")))),
 				f("spec", tc.spec),
 			)
-			if _, err := objs.Create(ctx, createCand); !errors.Is(err, envelope.ErrMalformed) {
+			if _, err := objs.Create(ctx, refs.Principal{}, createCand); !errors.Is(err, envelope.ErrMalformed) {
 				t.Errorf("Create(%s) = %v, want envelope.ErrMalformed", tc.name, err)
 			}
 			updateCand := rec(
 				f("meta", rec(f("kind", lkal.String("workload")), f("name", lkal.String("norm")))),
 				f("spec", tc.spec),
 			)
-			if _, err := objs.Update(ctx, updateCand); !errors.Is(err, envelope.ErrMalformed) {
+			if _, err := objs.Update(ctx, refs.Principal{}, updateCand); !errors.Is(err, envelope.ErrMalformed) {
 				t.Errorf("Update(%s) = %v, want envelope.ErrMalformed", tc.name, err)
 			}
 			if revAfterBad, err := st.CurrentRev(ctx); err != nil || revAfterBad != revBeforeBad {

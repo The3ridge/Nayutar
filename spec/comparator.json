@@ -27,7 +27,15 @@
     "Nayutar.Envelope.update_status_keeps_meta_and_spec",
     "Nayutar.Envelope.update_status_observed_is_monotone",
     "Nayutar.Envelope.update_status_since_follows_state",
-    "Nayutar.Envelope.stale_revision_is_rejected"
+    "Nayutar.Envelope.stale_revision_is_rejected",
+    "Nayutar.Refs.accepted_refs_well_placed",
+    "Nayutar.Refs.accepted_new_refs_checked",
+    "Nayutar.Refs.accepted_targets_bounded",
+    "Nayutar.Refs.index_delta_exact",
+    "Nayutar.Refs.accepted_put_compared",
+    "Nayutar.Refs.denied_ignores_presence",
+    "Nayutar.Refs.accepted_delta_valid",
+    "Nayutar.Refs.delete_clears_index"
   ],
   "permitted_axioms": [
     "propext",

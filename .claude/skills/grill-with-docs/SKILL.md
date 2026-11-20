@@ -3,12 +3,12 @@ name: grill-with-docs
 description: >-
   Interrogates a plan or design the user already has — one question at a time, walking every
   branch of the decision tree — and checks each answer against Nayutar's recorded decisions, namely
-  the ADRs in `docs/ADR/` (above all ADR 0001, the premises that must not move), the research in
-  `docs/research/poc.md`, and the code once it exists. Surfaces contradictions with a binding ADR, plans that
-  quietly shrink the goal or bring YAML back to the human-facing surface, and terms too fuzzy to
-  build on. Use whenever the user wants a plan stress-tested, grilled, or thought through out loud —
-  "grill me", "poke holes in this design", "stress-test this plan", 「このプランを詰めて」
-  「設計を叩いて」「ADR と矛盾してないか見て」 — even if they never mention the docs.
+  the ADRs in `docs/ADR/` (above all ADR 0001, the premises that must not move), and the code once
+  it exists. Surfaces contradictions with a binding ADR, plans that quietly shrink the goal or
+  bring YAML back to the human-facing surface, and terms too fuzzy to build on. Use whenever the
+  user wants a plan stress-tested, grilled, or thought through out loud — "grill me", "poke holes
+  in this design", "stress-test this plan", 「このプランを詰めて」 「設計を叩いて」
+  「ADR と矛盾してないか見て」 — even if they never mention the docs.
 allowed-tools: Bash, Read, Glob, Grep
 ---
 
@@ -33,7 +33,6 @@ Read from these before challenging anything:
 | Premises that must not move | ADR 0001 (`docs/ADR/0001-*.md`); changing one needs an ADR that supersedes it |
 | Decisions in force | `docdag query --binding --fields id,title,status,path` |
 | Decisions still open | ADRs with `status: proposed`; treat them as undecided, not as binding |
-| Research and rationale | `docs/research/poc.md` — read only the section the plan touches (§1 premises, §7 LKAL / kisage, §10 gates) |
 | Declaration format | `../LKAL/docs/PRINCIPLE.md` and `../LKAL/docs/ADR/` |
 | Ownership and apply | `../kisage/docs/PRINCIPLE.md` and `../kisage/docs/ADR/` |
 | Working rules | `AGENTS.md` |
@@ -57,8 +56,8 @@ can judge it (a Kubernetes differential test, a deterministic simulation, a form
 claimed capability, ask which oracle proves it and at which gate. "We'll test it later" is an open
 branch, not an answer.
 
-**Challenge against the documented language.** When a term conflicts with how an ADR or `docs/research/poc.md`
-uses it, say so immediately: "ADR NNNN uses '<term>' for X, but you seem to mean Y — which is it?"
+**Challenge against the documented language.** When a term conflicts with how an ADR uses it,
+say so immediately: "ADR NNNN uses '<term>' for X, but you seem to mean Y — which is it?"
 
 **Sharpen fuzzy terms.** Propose a precise canonical term when one is overloaded.
 
@@ -70,7 +69,7 @@ concept ends and the next begins.
 the code agrees, and surface the contradiction.
 
 **Capture resolved terms as you go**, in a running summary rather than batching them to the end. Writing
-a term into an ADR or `docs/research/poc.md` is a separate, user-approved edit: ask first. An unrequested glossary file
+a term into an ADR is a separate, user-approved edit: ask first. An unrequested glossary file
 becomes a second source of truth nobody maintains.
 
 ## Offer an ADR sparingly

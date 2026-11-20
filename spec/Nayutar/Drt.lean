@@ -5,6 +5,7 @@ import Nayutar.Drt.Keyspace
 import Nayutar.Drt.WatchCache
 import Nayutar.Drt.Liveness
 import Nayutar.Drt.Envelope
+import Nayutar.Drt.Refs
 
 open Lean
 open Nayutar.Fixture
@@ -103,6 +104,8 @@ def main (args : List String) : IO UInt32 := do
     runSuite Nayutar.Drt.Liveness.parseCase Nayutar.Drt.Liveness.caseToJson
   | ["envelope"] =>
     runSuite Nayutar.Drt.Envelope.parseCase Nayutar.Drt.Envelope.caseToJson
+  | ["refs"] =>
+    runSuite Nayutar.Drt.Refs.parseCase Nayutar.Drt.Refs.caseToJson
   | _ =>
-    IO.eprintln "usage: nayutar-drt register|store|keyspace|watchcache|liveness|envelope"
+    IO.eprintln "usage: nayutar-drt register|store|keyspace|watchcache|liveness|envelope|refs"
     return 2

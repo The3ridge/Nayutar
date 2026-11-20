@@ -72,4 +72,5 @@ func TestEtcdObjects(t *testing.T) {
 		}
 		return v
 	})
+	checkObjectsRefsSuite(t, isolatedRoot)
 }

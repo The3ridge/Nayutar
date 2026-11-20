@@ -18,6 +18,9 @@ const EvictionBudgetKey = "/sys/liveness/evictions"
 // BindingPrefix is the tenant-relative Range/Watch prefix for all bindings.
 const BindingPrefix = "bind/"
 
+// BackRefsPrefix is the tenant-relative Range/Watch prefix for all back-references.
+const BackRefsPrefix = "ref/"
+
 // Family identifies one of the canonical store key families.
 type Family uint8
 

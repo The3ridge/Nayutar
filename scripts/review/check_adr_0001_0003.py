@@ -129,14 +129,6 @@ def main() -> int:
     ]
     add("no Rust, TLA+, Quint, or Viper project files", banned_found == [], " ".join(banned_found) or "none")
 
-    add("poc.md is not at the repository root", "poc.md" not in tracked_set and not (ROOT / "poc.md").exists(), "missing")
-    poc = read("docs/research/poc.md")
-    add(
-        "verification gate table lives in docs/research/poc.md",
-        "### 10.3 検証ゲート" in poc and "仕様とハーネス" in poc,
-        "docs/research/poc.md",
-    )
-
     accepted_adrs = [
         ("ADR 0001", "docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md"),
         ("ADR 0002", "docs/ADR/0002-implement-the-core-in-go-and-write-specifications-in-lean-4.md"),

@@ -1,10 +1,14 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -444,61 +448,141 @@ func TestStoreContractHasNoLeases(t *testing.T) {
 	}
 }
 
-func TestResearchMemoPathResolves(t *testing.T) {
+func TestNoReferencesToResearchNotes(t *testing.T) {
 	root := repoRoot(t)
-	memo := filepath.Join(root, "docs", "research", "poc.md")
-	if !fileExists(memo) {
-		t.Fatal("docs/research/poc.md is missing")
-	}
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", ".lake":
-				return filepath.SkipDir
-			}
-			if rel, err := filepath.Rel(root, path); err == nil && filepath.ToSlash(rel) == agentWorktrees {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(d.Name(), ".md") {
-			return nil
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		if strings.Contains(string(data), "](poc.md)") || strings.Contains(string(data), "](./poc.md)") {
-			rel, relErr := filepath.Rel(root, path)
-			if relErr != nil {
-				t.Fatal(relErr)
-			}
-			t.Errorf("%s links to poc.md; the memo is docs/research/poc.md", filepath.ToSlash(rel))
-		}
-		return nil
-	})
+	cmd := exec.Command("git", "ls-files", "-z")
+	cmd.Dir = root
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("git ls-files -z: %v", err)
 	}
-
-	for _, rel := range []string{
-		"AGENTS.md",
-		"CLAUDE.md",
-		".claude/skills/grill-with-docs/SKILL.md",
-		".claude/skills/web-researcher/SKILL.md",
-	} {
-		body := readRepoFile(t, rel)
-		if !strings.Contains(body, "docs/research/poc.md") {
-			t.Errorf("%s does not reference docs/research/poc.md", rel)
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		rel := filepath.ToSlash(string(entry))
+		if rel == ".gitignore" || rel == "core/ci_test.go" {
+			continue
+		}
+		abs := filepath.Join(root, filepath.FromSlash(rel))
+		info, err := os.Lstat(abs)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("lstat %s: %v", rel, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || info.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		for _, lineNum := range researchNotesRefLines(rel, string(data)) {
+			t.Errorf("%s:%d: references removed research notes", rel, lineNum)
 		}
 	}
-	adr := readRepoFile(t, "docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md")
-	if !strings.Contains(adr, "docs/research/poc.md") {
-		t.Error("ADR 0001 does not record that the survey memo is docs/research/poc.md")
+}
+
+func TestResearchNotesRefLines(t *testing.T) {
+	cases := []struct {
+		name    string
+		rel     string
+		content string
+		want    []int
+	}{
+		{
+			name: "match",
+			rel:  "AGENTS.md",
+			content: "line one\n" +
+				"see docs/research/poc.md\n" +
+				"and poc.md\n" +
+				"and draft_20261117_001.md\n",
+			want: []int{2, 3, 4},
+		},
+		{
+			name:    "no match",
+			rel:     "README.md",
+			content: "clean line\nanother clean line\n",
+			want:    nil,
+		},
+		{
+			name: "accepted ADR skipped",
+			rel:  "docs/ADR/0001-example.md",
+			content: "---\n" +
+				"title: Example\n" +
+				"status: accepted\n" +
+				"---\n\n" +
+				"Historical note: docs/research/poc.md\n",
+			want: nil,
+		},
+		{
+			name: "proposed ADR checked",
+			rel:  "docs/ADR/0099-example.md",
+			content: "---\n" +
+				"title: Example\n" +
+				"status: proposed\n" +
+				"---\n\n" +
+				"status: accepted\n" +
+				"Ref: docs/research/poc.md\n",
+			want: []int{7},
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := researchNotesRefLines(tc.rel, tc.content)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("researchNotesRefLines(%q, ...) = %v, want %v", tc.rel, got, tc.want)
+			}
+		})
+	}
+}
+
+var researchNoteNeedles = []string{
+	"docs/research",
+	"poc.md",
+	"draft_20261117_001",
+}
+
+func researchNotesRefLines(rel, content string) []int {
+	rel = filepath.ToSlash(rel)
+	if rel == ".gitignore" || rel == "core/ci_test.go" || isAcceptedADR(rel, content) {
+		return nil
+	}
+	var lines []int
+	for i, line := range strings.Split(content, "\n") {
+		for _, needle := range researchNoteNeedles {
+			if strings.Contains(line, needle) {
+				lines = append(lines, i+1)
+				break
+			}
+		}
+	}
+	return lines
+}
+
+func isAcceptedADR(rel, content string) bool {
+	if path.Dir(rel) != "docs/ADR" || !strings.HasSuffix(rel, ".md") {
+		return false
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 || strings.TrimRight(lines[0], "\r") != "---" {
+		return false
+	}
+	accepted := false
+	for _, line := range lines[1:] {
+		trimmed := strings.TrimRight(line, "\r")
+		if trimmed == "---" {
+			return accepted
+		}
+		if k, v, ok := strings.Cut(trimmed, ":"); ok {
+			if strings.TrimSpace(k) == "status" && strings.Trim(strings.TrimSpace(v), `"'`) == "accepted" {
+				accepted = true
+			}
+		}
+	}
+	return false
 }
 
 func TestAgentInstructionsMatchTheGoAndLeanSplit(t *testing.T) {

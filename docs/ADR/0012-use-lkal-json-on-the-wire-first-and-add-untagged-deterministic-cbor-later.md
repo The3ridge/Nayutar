@@ -42,11 +42,11 @@ depends-on: ["0009"]
 
 ## 根拠（調査結果・出典）
 
-- LKAL（`https://github.com/Kaikei-e/LKAL`）の `docs/PRINCIPLE.md`（§7、2026-11-17 確認）：`ToJSON` / `FromJSON` が `$lkal`・`$enum`・`$qty`・`$ref` の 4 つの予約キーを用いて 9 型すべてを可逆往復でき、`$` 始まりのユーザキー・ラベルを拒否するため衝突しないことを確認した。なお `docs/research/draft_20261117_001.md` §2.3 は Decimal を 10 進文字列と記していたが、実際の LKAL-JSON では Decimal は引用符なしの JSON 数値（`0.25`）であり、引用符付き（`"0.25"`）は String になることを確認した。
+- LKAL（`https://github.com/Kaikei-e/LKAL`）の `docs/PRINCIPLE.md`（§7、2026-11-17 確認）および `json.go`（2026-11-21 確認）：`ToJSON` / `FromJSON` が `$lkal`・`$enum`・`$qty`・`$ref` の 4 つの予約キーを用いて 9 型すべてを可逆往復でき、`$` 始まりのユーザキー・ラベルを拒否するため衝突しないことを確認した。また `json.go` の実装上、`Decimal` は引用符なしの JSON 数値（`0.25`）として符号化・復号され、引用符付き（`"0.25"`）は `String` になることを確認した。
 - LKAL の ADR 0006（accepted）およびリポジトリ状況（2026-11-17 確認）：`/` パスの Get / Set / Delete が規定されている一方、CBOR および Diff/Patch に関する ADR や文書はまだ存在しないことを確認した。
-- RFC 8949 の決定論的符号化規定の詳細は未確認である（`docs/research/draft_20261117_001.md` §2.4・§6.4）。
-- Kubernetes KEP-4222（https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/ ）：`CBORServingAndStorage` 機能ゲートは v1.37 でも Alpha かつ既定で無効であることを確認した。`docs/research/draft_20261117_001.md` §2.3 にあった「索引上 beta/1.37」という食い違いは Alpha で解消した。
-- `docs/research/draft_20261117_001.md` §6.4・§6.8・§11：段階導入と Patch 例に基づく。
+- RFC 8949 の決定論的符号化規定の詳細は、本 ADR の時点では未確認である。
+- Kubernetes KEP-4222（ https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/ 、2026-11-17 確認）：`CBORServingAndStorage` 機能ゲートは v1.37 でも Alpha かつ既定で無効であることを確認した。KEP 索引（ https://www.kubernetes.dev/resources/keps/4222/ 、2026-11-17 確認）の記載（beta/1.37）との食い違いは、feature gates 一覧の Alpha の記載により解消した。
+- **段階導入と Patch 形式（本 ADR の設計判断）**：G0〜G1 は実装済みの LKAL-JSON を用いて立ち上げを優先し、タグ管理や決定論的符号化の検討を要する LKAL-CBOR は G2 から追加する。Patch 形式（決定の節の例）は LKAL の ADR 0006（Get / Set / Delete）の `/` パスモデルに合わせ、楽観ロック用の `test` 操作を加えた形として本 ADR で定めた。
 
 ## 検討した代替案
 

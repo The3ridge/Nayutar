@@ -32,7 +32,7 @@ ADR 0017 は `status: proposed` で、`docdag query --binding` には出ない�
 | ADR-0001-R6 | 「Certified Kubernetes は名乗らず、API 互換はワークロード部分互換の取り込み層に限る。」 | `rg -n "Certified Kubernetes" README.md core spec .github` | PASS | 認定の宣言も、Kubernetes API の実装も無い。 |
 | ADR-0001-R7 | 「開発は個人＋AI コーディングエージェントで行う。そのため、品質は機械判定できるオラクルで外から確かめられる形にする。」 | `python3 scripts/tests/test-agent-harness.py` | PARTIAL | ハーネス試験は 94 件成功。この段階のオラクルは DRT 枠と `lake comparator` である。Kubernetes 差分と ESR は 0017 決定 7 で DEFERRED。シミュレーション用インターフェースは無い。 |
 | ADR-0001-R8 | 「段階はすべて検証ゲートとして定義し、どの段階も製品として完結させない。」 | README と追跡ファイル | PASS | リリース成果物は無く、README はライセンスの案内だけである。 |
-| ADR-0001-R9 | 「ゲート G0〜G4 の内容は `poc.md` §10.3 を出発点とし」 | `test -f poc.md`；`test -f docs/research/poc.md` | PARTIAL | 直下の `poc.md` は無い。本文は `docs/research/poc.md` の「### 10.3 検証ゲート」にある。AGENTS.md のリンクも `poc.md` のままである。 |
+| ADR-0001-R9 | ADR 0001 決定 7（ゲート G0〜G4 の内容の出発点） | ADR 0001 が指していた調査メモの所在確認 | PARTIAL | 当時の確認ではリポジトリ直下に調査メモは無く、別パスに置かれていた（現在はリポジトリに含めない）。AGENTS.md のリンクも古いパスのままだった。 |
 | ADR-0001-R10 | 「個々のゲートの合格条件は別の ADR で定める。」影響節は「最初に G0 の合格条件を ADR として定める。」 | `rg -n "^title:" docs/ADR/*.md`；`docdag query --binding` | FAIL | 合格条件を決定本文にした ADR は無い。0017 は G0 の件数を決定 7 の後続実装で満たすと書くが、G0 合格条件そのものの ADR ではない。 |
 | ADR-0001-R11 | 「前提を変えるときは、この ADR を `supersedes` する新しい ADR で行う。」 | `rg -n "^supersedes:" docs/ADR`；`git diff 7678320..f4a5a2c -- docs/ADR/0001-*.md` | PASS | supersedes は 0 件。0001 の差分は `status: accepted` の 1 行である。 |
 | ADR-0002-R1 | 「中核の実装言語は Go とする。最低対応版は … Go 1.27.3 とし、以後は特定版に固定せず … 最新 2 メジャーリリースに追従する。」 | `cat go.mod`；`go version`；`go env GOTOOLCHAIN`；上流 `go.mod`；`https://go.dev/dl/?mode=json`；CI run 44012939868 | PASS | `go.mod` は `go 1.27.3` のみ。`toolchain` 行は無い。ローカルは `go1.27.3`、`GOTOOLCHAIN=auto`。LKAL の main と kisage v0.1.2 も `go 1.27.3`。stable は `go1.27.4` と `go1.26.11` で、1.26 は下限未満。CI の Go 1.27 と Go 1.27.3 は success。 |
@@ -126,7 +126,7 @@ ADR 0017 は `status: proposed` で、`docdag query --binding` には出ない�
 
 2. **中: G0 の合格条件を決める ADR が無い（ADR-0001-R10）。** 0001 はそれを最初に書くと決めた。0017 は件数を後続へ送るだけで、合格条件の ADR ではない。
 3. **中: シミュレーションの接続がコードに無い（ADR-0002-R6）。** 0015 は proposed のまま、`Clock`・`Net`・`Disk`・`Rand` は無い。0017 はこのインターフェースを決定 7 に含めていない。
-4. **低: `poc.md` のパスが辿れない（ADR-0001-R9）。** 実体は `docs/research/poc.md`。
+4. **低: ADR 0001 が指していた調査メモのパスが辿れない（ADR-0001-R9）。** 当時は別パスに置かれていた（現在はリポジトリに含めない）。
 5. **低: 所有権の中核と、OCI / CNI / CSI / containerd の利用は未着手（ADR-0001-R3、ADR-0001-R5）。** 矛盾する実装は無い。0017 が先送りしたのは所有権モデルの DRT であり、0001 の前提そのものではない。
 
 0017 の影響節が引き受けるリスク（主張と証明の同時書き換え、モデル定義による主張の意味の変化、ハーネスがシェルを見ないこと）は、この段階の未実装としては数えない。comparator とハーネスは、決定 6 が書いた検査としては動いている。

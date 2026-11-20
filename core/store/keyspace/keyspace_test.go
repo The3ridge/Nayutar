@@ -756,6 +756,9 @@ func TestPrefixes(t *testing.T) {
 		t.Errorf("OwnershipPrefix(core, Pod) error = %v, want ErrInvalid", err)
 	}
 
+	if keyspace.BackRefsPrefix != "ref/" {
+		t.Errorf("BackRefsPrefix = %q, want %q", keyspace.BackRefsPrefix, "ref/")
+	}
 	if got, err := keyspace.BackRefPrefix(keyspace.Object{Group: "core", Kind: "secret", Name: "db"}); err != nil || got != "ref/secret/db/" {
 		t.Errorf("BackRefPrefix(core) = (%q, %v)", got, err)
 	}

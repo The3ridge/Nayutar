@@ -8,7 +8,6 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
 
 個人と AI コーディングエージェントで **Kubernetes の本格的な代替** となるオーケストレータを作るプロジェクト。宣言の基盤に [LKAL](https://github.com/Kaikei-e/LKAL)、所有権と apply の中核に [kisage](https://github.com/Kaikei-e/kisage) の葉パス所有権モデルを使う。
 
-- 構想と調査：[`docs/research/poc.md`](docs/research/poc.md)。長いので、必要な節だけ見出しから辿る（§1 前提、§7 LKAL / kisage の役割、§10 成立条件と検証ゲート）。
 - 動かさない前提：[ADR 0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)。設計判断はこれに反してはならない。前提を変えるときは 0001 を `supersedes` する ADR を書く。
 - 現状：中核は Go モジュール（言語版の下限は 1.27.3、toolchain は固定しない）、仕様は [`spec/`](spec/) の独立した Lean 4 パッケージ（ADR 0002）。次のものは実装済みである。決定の ADR はどれも `accepted`、矢印の先は実現方式の ADR で `proposed` である。
   - DRT の枠組み（`core/drt` と Lean の実行ファイル `nayutar-drt`）と定理の主張を守る仕組み：ADR 0017
@@ -19,7 +18,8 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
   - watch キャッシュ：ADR 0007 → ADR 0023
   - ノードの死活監視：ADR 0008 → ADR 0024
   - リソースの封筒：ADR 0009 → ADR 0025
-- 所有権のモデル本体、ESR の証明、Kubernetes との差分試験は後続 ADR の範囲であり、まだ実装していない。
+  - 参照の検査と逆参照索引：ADR 0010 → ADR 0026（`Binding` の identityHash つきの解決とコントローラの読み取りの制限は、Export と `Binding` の ADR に残してある）
+- 所有権のモデル本体、Export と `Binding`、ESR の証明、Kubernetes との差分試験は後続 ADR の範囲であり、まだ実装していない。
 - コードを書き始める前に、その決定を ADR として起票する。
 
 ## 領域ごとの指示
@@ -45,7 +45,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
 ## 前提から来る作業ルール
 
 - **人間が書く設定・宣言は LKAL（`.lkal`）で書く。YAML は書かない。** YAML は取り込み入力としてだけ扱う。例外は外部ツールが要求するもの（`docdag.yaml`、ADR の frontmatter、`.github/workflows/`、`.github/dependabot.yml`、スキルとルールの frontmatter）。機械向けのワイヤやデータは JSON（LKAL-JSON）を使ってよい。
-- 進め方は検証ゲート（`docs/research/poc.md` §10.3 の G0〜G4）単位。段階を製品として完結させない。正解を機械判定できるオラクル（Kubernetes との差分試験・決定論的シミュレーション・形式仕様）を先に用意し、それで品質を確かめる。
+- 進め方は検証ゲート G0〜G4（ADR 0001 の決定 7。G0 の合格条件は ADR 0018）単位。段階を製品として完結させない。正解を機械判定できるオラクル（Kubernetes との差分試験・決定論的シミュレーション・形式仕様）を先に用意し、それで品質を確かめる。
 - 未実装の機能や、実行していない検証を完了扱いにしない。
 
 ## ハーネスが止めるもの
@@ -75,7 +75,7 @@ ADR は `docs/ADR/` にあり、[DocDag](https://github.com/Kaikei-e/DocDag) で
 - 書いたら `lkal check FILE` と `lkal fmt -w FILE` を通す。CI は追跡中の全 `.lkal` に `lkal check` と `lkal fmt -l` をかける。
 - 値の読み書きは `lkal get -r FILE PATH` / `lkal set FILE PATH VALUE`（`/` 区切りのパス）。LKAL の構文を自前でパースしない。JSON が要るときは `lkal json -plain FILE`。
 - Go で任意の LKAL の値を扱うときは、LKAL の Go モジュール（`github.com/Kaikei-e/LKAL`。タグが無いので擬似バージョン）の `FromJSON`・`ToJSON`・`Equal`・`Set` を使い、汎用の LKAL-JSON の読み書きを Nayutar に書かない。
-- 仕様と設計原則はローカル clone の `../LKAL/docs/PRINCIPLE.md` と `../LKAL/docs/ADR/` を読む。LKAL への変更が要ると判断したら、Nayutar 側で回避策を作らず、LKAL 側の変更として提案する（`docs/research/poc.md` §7 の追加候補を参照）。
+- 仕様と設計原則はローカル clone の `../LKAL/docs/PRINCIPLE.md` と `../LKAL/docs/ADR/` を読む。LKAL への変更が要ると判断したら、Nayutar 側で回避策を作らず、LKAL 側の変更として提案する。
 
 ## 検証コマンド
 
@@ -100,7 +100,7 @@ python3 scripts/tests/test-agent-harness.py && python3 scripts/agent-harness/har
 
 ## 言語と Git
 
-- 会話は日本語。コード・コメント・docstring・コミットメッセージ・PR タイトルは英語。ADR と `docs/research/poc.md` は日本語。
+- 会話は日本語。コード・コメント・docstring・コミットメッセージ・PR タイトルは英語。ADR は日本語。
 - コメントは既定で書かない。理由が自明でないときだけ 1 行。Issue 番号やゲート名（G0 など）をコードやコメントに書かない。
 - `git push`、PR の作成・マージ、ワークフローの実行・再実行・キャンセルは、その操作を明示的に頼まれたときだけ行う。コミットの依頼を push の許可と読み替えない。
 - `--no-verify` などでフックや署名を飛ばさない。
