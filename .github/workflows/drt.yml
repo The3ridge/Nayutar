@@ -1,0 +1,86 @@
+name: DRT
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  drt:
+    name: Lean–Go differential tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Vet differential tests
+        run: go vet -tags "drt etcd" ./core/drt/...
+
+      - name: Install Elan
+        env:
+          ELAN_VERSION: v4.2.4
+          ELAN_SHA256: 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
+        run: |
+          set -euo pipefail
+          archive="elan-x86_64-unknown-linux-gnu.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+            -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/leanprover/elan/releases/download/${ELAN_VERSION}/${archive}"
+          echo "${ELAN_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}"
+          "${RUNNER_TEMP}/elan-init" -y --default-toolchain none
+          echo "${HOME}/.elan/bin" >> "${GITHUB_PATH}"
+
+      - name: Build the Lean DRT executable
+        working-directory: spec
+        run: |
+          set -euo pipefail
+          lake --version
+          lake build nayutar-drt
+
+      - name: Install etcd
+        env:
+          ETCD_VERSION: v3.6.16
+          ETCD_SHA256: c8c0d96d8292ef085deabbf735e9561d3d396768e4d606df005aa25964f21911
+        run: |
+          set -euo pipefail
+          archive="etcd-${ETCD_VERSION}-linux-amd64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+            -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/${archive}"
+          echo "${ETCD_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/etcd"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/etcd" --strip-components=1
+          "${RUNNER_TEMP}/etcd/etcd" --version
+
+      - name: Run Lean–Go differential tests
+        env:
+          NAYUTAR_DRT_CASES: ${{ github.event_name == 'push' && '10000' || '1000' }}
+        run: go test -count=1 -tags drt ./core/drt/...
+
+      - name: Run Lean–Go differential tests against etcd
+        env:
+          NAYUTAR_DRT_CASES: ${{ github.event_name == 'push' && '10000' || '1000' }}
+          NAYUTAR_ETCD_BIN: ${{ runner.temp }}/etcd/etcd
+        run: go test -count=1 -tags "drt etcd" ./core/drt/... -timeout 25m

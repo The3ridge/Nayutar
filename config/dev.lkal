@@ -1,0 +1,11 @@
+@lkal "0.1"
+
+### Desired state for the local development environment, reconciled by kisage
+
+### Single etcd cluster that holds every tenant's data
+etcd {
+  version = "3.6.16"
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { client-url = "http://127.0.0.1:22379", peer-url = "http://127.0.0.1:22380" }
+  member "m2" { client-url = "http://127.0.0.1:32379", peer-url = "http://127.0.0.1:32380" }
+}

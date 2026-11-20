@@ -1,0 +1,14 @@
+name = "nayutar"
+defaultTargets = ["Nayutar", "nayutar-drt"]
+
+[[require]]
+name = "kisage"
+git = "https://github.com/Kaikei-e/kisage.git"
+rev = "v0.1.2"
+
+[[lean_lib]]
+name = "Nayutar"
+
+[[lean_exe]]
+name = "nayutar-drt"
+root = "Nayutar.Drt"
