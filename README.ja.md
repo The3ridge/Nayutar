@@ -4,7 +4,7 @@
 
 **Nayutar** は、1 人の開発者と AI コーディングエージェントの協働によって **Kubernetes の本格的な代替** を目指すコンテナオーケストレータです。機械判定できる形式仕様と差分オラクルを設計の中心に据えて構築しています。
 
-人間が書く宣言には YAML ではなく型付きの宣言言語 [LKAL](https://github.com/Kaikei-e/LKAL) を用い、複数アクターによるフィールド単位の協調更新には [kisage](https://github.com/Kaikei-e/kisage) の葉パス所有権モデルを採用します。コンテナ実行・ネットワーク・ストレージには OCI・containerd・CNI・CSI などの既存データプレーン資産を活かし、車輪の再発明を行いません。すべての設計判断は [DocDag](https://github.com/Kaikei-e/DocDag) で検証される決定記録（[`docs/ADR/`](docs/ADR/)）として管理しています。
+人間が書く宣言には型付きの宣言言語 [LKAL](https://github.com/Kaikei-e/LKAL) を用い、複数アクターによるフィールド単位の協調更新には [kisage](https://github.com/Kaikei-e/kisage) の葉パス所有権モデルを採用します。コンテナ実行・ネットワーク・ストレージには OCI・containerd・CNI・CSI などの標準的なデータプレーン基盤を活かします。すべての設計判断は [DocDag](https://github.com/Kaikei-e/DocDag) で検証される決定記録（[`docs/ADR/`](docs/ADR/)）として管理しています。
 
 > [!IMPORTANT]
 > **現在のステータス — 初期開発・プレリリース（検証ゲート G0 を構築中）**
@@ -15,11 +15,11 @@
 
 ## なぜ Nayutar か？（目的と便益）
 
-Nayutar は「小規模向けの手軽なオーケストレータ」を目標にはしません。マルチテナント・数万ノード規模の本格的なオーケストレーションを射程に入れつつ、設定記述・所有権競合・テナント分離・制御面のスケーリングにおける構造的なつらさを手放すことを目的としています（[ADR 0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)）。
+Nayutar は対象を単一ノードや小規模クラスタに絞るのではなく、マルチテナント・数万ノード規模のオーケストレーションを目標に据え、宣言の記述・フィールド所有権・テナント分離・制御面のスケーリングを明示的な不変条件から設計しています（[ADR 0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)）。
 
-### 1. 型安全な宣言と、人間が書く面からの YAML 追放
+### 1. LKAL による型付き宣言と、既存 YAML 資産の取り込み
 
-利用者が書く設定や API マニフェストには [LKAL](https://github.com/Kaikei-e/LKAL)（`.lkal`）を採用し、暗黙の型変換・インデント起因の事故・`null` の曖昧さを排除します。単位つき数量（`512Mi`）・列挙値（`.tcp`）・型付き参照（`&secret/db-creds/spec/password`）が構文レベルで一意に定まり、すべてのリソースは統一された 3 区画の封筒（`meta`・`spec`・`status`）を持ちます（[ADR 0009](docs/ADR/0009-fix-the-resource-envelope-to-meta-spec-and-status.md)、[ADR 0025](docs/ADR/0025-realize-the-resource-envelope-with-a-lowercase-kind-two-write-entrances-a-pure-transition-core-and-an-object-store-binding.md)）。
+利用者が書く設定や API マニフェストには [LKAL](https://github.com/Kaikei-e/LKAL)（`.lkal`）を用います。構文から値の型が一意に決まり、未設定は `null` ではなくパスの不在で表します。単位つき数量（`512Mi`）・列挙値（`.tcp`）・型付き参照（`&secret/db-creds/spec/password`）を言語の値として直接記述でき、すべてのリソースは統一された 3 区画の封筒（`meta`・`spec`・`status`）を持ちます（[ADR 0009](docs/ADR/0009-fix-the-resource-envelope-to-meta-spec-and-status.md)、[ADR 0025](docs/ADR/0025-realize-the-resource-envelope-with-a-lowercase-kind-two-write-entrances-a-pure-transition-core-and-an-object-store-binding.md)）。
 
 ```lkal
 @lkal "0.1"
@@ -41,35 +41,35 @@ spec {
 }
 ```
 
-- **意図と観測状態の厳格な分離**：書き込みの入口は `Update`（`labels` と `spec`）と `UpdateStatus`（`status`）の 2 つに分かれます。入口の外の欄やサーバ専用欄（`uid`・`generation`・`revision`・条件の `since`）は、省略または現在値と一致しない限り拒否され、黙って無視されることはありません。
-- **YAML は取り込み境界に限定**：既存の Kubernetes 資産（Helm・KRM・Compose などの YAML）は取り込み入力としてのみ扱います。Kubernetes の適合認定や、複雑なパッチ意味論・グローバル CRD への追従負担は引き受けません。
+- **意図と観測状態の明示的な分離**：書き込みの入口は `Update`（`labels` と `spec`）と `UpdateStatus`（`status`）の 2 つに分かれます。入口の外の欄やサーバ専用欄（`uid`・`generation`・`revision`・条件の `since`）は、省略または現在値と一致しない限り拒否され、意図しない変更がその場で検出されます。
+- **取り込み層を通じた既存 YAML 資産との連携**：Helm・KRM・Compose などの既存 YAML マニフェストは、人間が直接保守する形式ではなく取り込み入力としてサポートする設計です。Kubernetes API 全体の完全互換や適合認定は目標とせず、互換の範囲をワークロード取り込み層に明確に区切っています。
 
 ### 2. テナント最上位の隔離境界と、書き込み時の参照検査
 
-名前の衝突を防ぐ階層と権限・分離の境界が混ざることで生じるコントローラの越境参照脆弱性を防ぐため、ストアのキー空間の最上位を `/t/<tenant>/` に固定し、命名階層はドット区切りのオブジェクト名の中に閉じ込めています（[ADR 0006](docs/ADR/0006-put-the-tenant-at-the-top-of-the-key-space-and-keep-namespaces-out-of-keys.md)、[ADR 0022](docs/ADR/0022-realize-the-key-space-with-a-strict-segment-grammar-a-key-codec-and-a-fenced-tenant-registry.md)）。
+隔離の単位と命名のための階層を分けるため、ストアのキー空間の最上位にテナント（`/t/<tenant>/`）を置き、名前の階層はドット区切りのオブジェクト名で表します（[ADR 0006](docs/ADR/0006-put-the-tenant-at-the-top-of-the-key-space-and-keep-namespaces-out-of-keys.md)、[ADR 0022](docs/ADR/0022-realize-the-key-space-with-a-strict-segment-grammar-a-key-codec-and-a-fenced-tenant-registry.md)）。
 
 - **単一接頭辞による分離とフェンスつき管理**：オブジェクト本体・所有権・逆参照索引・Binding のすべてが `/t/<tenant>/` 配下に集約されるため、プレフィックス単位の隔離、フェンスつきの再開可能な 2 段階テナント削除、将来のテナント別ストア分割がキー構造レベルで成立します。
-- **書き込み時の fail-closed な参照検査**：参照（`Ref`）はテナント内の相対名かつ `spec` 内に限定されます。作成・更新時に追加された `(sourcePath, ref)` ごとに参照スキーマ表、[Cedar](https://docs.cedarpolicy.com/) による認可（`Nayutar::Action::"Reference"`）、参照先の存在と `mod_revision` を検査し、オブジェクト本体および逆参照索引と**同一の原子的トランザクション**で書き込みます（[ADR 0010](docs/ADR/0010-check-references-at-write-time-and-keep-them-inside-a-tenant.md)、[ADR 0026](docs/ADR/0026-realize-reference-checking-with-a-pure-check-core-a-reference-schema-table-cedar-authorization-and-a-back-reference-index-in-the-object-transaction.md)）。
+- **書き込み時の fail-closed な参照検査**：参照（`Ref`）はテナント内の相対名かつ `spec` 内に置かれます。作成・更新時に追加された `(sourcePath, ref)` ごとに参照スキーマ表、[Cedar](https://docs.cedarpolicy.com/) による認可（`Nayutar::Action::"Reference"`）、参照先の存在と `mod_revision` を検査し、オブジェクト本体および逆参照索引と**同一の原子的トランザクション**で書き込むことで、コントローラ権限を介した越境参照を書き込み時点で防ぎます（[ADR 0010](docs/ADR/0010-check-references-at-write-time-and-keep-them-inside-a-tenant.md)、[ADR 0026](docs/ADR/0026-realize-reference-checking-with-a-pure-check-core-a-reference-schema-table-cedar-authorization-and-a-back-reference-index-in-the-object-transaction.md)）。
 
-### 3. `force` 上書きのない葉パス所有権モデル *(設計済み・実装予定 — [ADR 0013](docs/ADR/0013-store-leaf-path-ownership-under-its-own-key-and-update-it-in-the-same-transaction.md))*
+### 3. 明示的な葉パス所有権モデル *(設計済み・実装予定 — [ADR 0013](docs/ADR/0013-store-leaf-path-ownership-under-its-own-key-and-update-it-in-the-same-transaction.md))*
 
 複数コントローラや利用者による協調更新の中核には [kisage](https://github.com/Kaikei-e/kisage) の葉パス所有権モデルを据えています。
 
-- 葉パス所有権メタデータはオブジェクト本体に埋め込まず独立キー（`/t/<tenant>/own/...`）に分離し、本体と同じ CAS トランザクション（`Txn`）で原子的に更新することで、`managedFields` による本体・watch ペイロードの肥大化を防ぎます。
-- 所有権競合・構造衝突・外部ドリフトは診断コードを返して fail-closed で停止し、他者の所有葉を強引に奪う `--force` は設けません。また `apply` と保守的な削除である `prune` を明確に分離します。
+- 葉パスごとの所有権メタデータはオブジェクト本体とは別の独立キー（`/t/<tenant>/own/...`）に格納し、本体と同一の CAS トランザクション（`Txn`）で原子的に更新することで、通常のオブジェクト読み取りや watch ペイロードを小さく保ちます。
+- 所有権の競合・構造衝突・外部ドリフトは診断コードを返して fail-closed で停止し、強制上書きオプションではなく明示的な所有権の引き継ぎ（`adopt` / `release`）で解消します。また、更新（`apply`）と自分が作成した葉だけを対象にする保守的な削除（`prune`）を別操作に分けています。
 
-### 4. 心拍と Watch の負荷から合意ストアを守る制御面
+### 4. ソフトステート死活監視とテナント別 Watch キャッシュ
 
-- **合意ストアへの定常心拍書き込みゼロ**：内部ストア契約から Lease と TTL つきキーを除外しています（[ADR 0004](docs/ADR/0004-fix-a-subset-of-the-etcd-v3-api-without-leases-as-the-store-contract.md)）。ノードの心拍は死活集約器のメモリ上のソフトステートとして保持し、整数演算による φ accrual 障害検知・rendezvous hashing による担当割り当て・中継ノード／他ラック証人による間接確認・自己疑い（self-suspicion）を経て**確定した状態遷移（`Ready` / `NotReady`）とレート制限つきの退避許可だけ**を CAS でストアに書き込みます。合意層の書き込み負荷はノード数ではなく実障害の発生率に比例します（[ADR 0008](docs/ADR/0008-keep-node-liveness-as-soft-state-and-write-only-confirmed-transitions-to-the-store.md)、[ADR 0024](docs/ADR/0024-realize-node-liveness-with-an-exact-phi-test-a-deterministic-detector-core-a-node-registry-and-a-rate-limited-eviction-permit.md)）。
-- **テナント×型別のインメモリ Watch キャッシュ**：読み取り・リビジョン指定スナップショット・ブックマーク・`watch list` によるストリーミング初期同期を、パスコピー型永続 B-tree と「閉じたリビジョン」を備えたキャッシュから配信し、特定テナントの大量更新が他テナントの履歴を押し流すことを防ぎます（[ADR 0007](docs/ADR/0007-serve-watches-from-a-per-tenant-cache-with-revisions-bookmarks-and-watch-list.md)、[ADR 0023](docs/ADR/0023-realize-the-watch-cache-as-a-library-with-a-persistent-b-tree-closed-revisions-and-an-in-process-compaction-bound.md)）。
+- **心拍数ではなく状態遷移に比例する合意書き込み**：内部ストア契約は Lease と TTL つきキーを持たない構成です（[ADR 0004](docs/ADR/0004-fix-a-subset-of-the-etcd-v3-api-without-leases-as-the-store-contract.md)）。ノードの心拍は死活集約器のメモリ上のソフトステートとして保持し、整数演算による φ accrual 障害検知・rendezvous hashing による担当割り当て・中継ノード／他ラック証人による間接確認・自己疑い（self-suspicion）を経て、**確定した状態遷移（`Ready` / `NotReady`）とレート制限つきの退避許可だけ**を CAS でストアに書き込みます（[ADR 0008](docs/ADR/0008-keep-node-liveness-as-soft-state-and-write-only-confirmed-transitions-to-the-store.md)、[ADR 0024](docs/ADR/0024-realize-node-liveness-with-an-exact-phi-test-a-deterministic-detector-core-a-node-registry-and-a-rate-limited-eviction-permit.md)）。
+- **テナント×型別のインメモリ Watch キャッシュ**：読み取り・リビジョン指定スナップショット・ブックマーク・`watch list` によるストリーミング初期同期を、パスコピー型永続 B-tree と「閉じたリビジョン」を備えたキャッシュから配信します。テナント間で履歴保持を分離し、あるテナントの高頻度な更新が他テナントの watch 履歴に影響しないようにします（[ADR 0007](docs/ADR/0007-serve-watches-from-a-per-tenant-cache-with-revisions-bookmarks-and-watch-list.md)、[ADR 0023](docs/ADR/0023-realize-the-watch-cache-as-a-library-with-a-persistent-b-tree-closed-revisions-and-an-in-process-compaction-bound.md)）。
 
-### 5. 実績あるデータプレーンの活用と不要な中間層の排除
+### 5. 標準データプレーンの活用と直接統合
 
-初期の強整合ストアには差し替え可能な `Store` 契約の背後に 3 台構成の etcd v3.6 クラスタを用い（[ADR 0005](docs/ADR/0005-start-on-a-single-etcd-cluster-with-tenant-key-prefixes.md)）、データプレーンでは CRI（`PodSandbox`）を介さず containerd 2.3 LTS の Go クライアント・CNI プラグイン・CSI gRPC サービス・既定拒否の `nftables` チェインを直接駆動する構成を採ります（[ADR 0014](docs/ADR/0014-drive-containerd-directly-without-cri.md)、[ADR 0016](docs/ADR/0016-enforce-default-deny-network-policy-with-nftables-first.md)）。
+初期の強整合ストアには差し替え可能な `Store` 契約の下で 3 台構成の etcd v3.6 クラスタを用い（[ADR 0005](docs/ADR/0005-start-on-a-single-etcd-cluster-with-tenant-key-prefixes.md)）、データプレーンでは containerd 2.3 LTS の Go クライアント・標準 CNI プラグイン・CSI gRPC サービス・既定拒否の `nftables` チェインと直接統合することで、Linux とクラウドネイティブの既存基盤を Nayutar のワークロードモデルに合わせて活かします（[ADR 0014](docs/ADR/0014-drive-containerd-directly-without-cri.md)、[ADR 0016](docs/ADR/0016-enforce-default-deny-network-policy-with-nftables-first.md)）。
 
 ### 6. 個人＋AI エージェント開発を支える機械判定オラクル
 
-少人数と AI エージェントで大規模型システムを破綻なく構築するため、AI が目標を弱めてすり抜けられない外部オラクルで品質を確かめます（[ADR 0002](docs/ADR/0002-implement-the-core-in-go-and-write-specifications-in-lean-4.md)、[ADR 0003](docs/ADR/0003-assure-the-implementation-by-differential-testing-against-lean-models-instead-of-proving-it.md)、[ADR 0017](docs/ADR/0017-build-the-drt-harness-and-the-theorem-statement-guard-first-and-defer-the-models-the-esr-proof-and-the-kubernetes-oracle.md)、[ADR 0021](docs/ADR/0021-guard-the-trust-root-of-the-theorem-statements-on-the-server-and-run-the-lean-and-drt-workflows-on-every-change.md)）。
+1 人の開発者と AI エージェントで大規模オーケストレータを構築するため、人間が仕様の信頼の根を管理し、機械判定できる外部オラクルで検証する体制をとっています（[ADR 0002](docs/ADR/0002-implement-the-core-in-go-and-write-specifications-in-lean-4.md)、[ADR 0003](docs/ADR/0003-assure-the-implementation-by-differential-testing-against-lean-models-instead-of-proving-it.md)、[ADR 0017](docs/ADR/0017-build-the-drt-harness-and-the-theorem-statement-guard-first-and-defer-the-models-the-esr-proof-and-the-kubernetes-oracle.md)、[ADR 0021](docs/ADR/0021-guard-the-trust-root-of-the-theorem-statements-on-the-server-and-run-the-lean-and-drt-workflows-on-every-change.md)）。
 
 1. **実行可能な Lean 4 モデルと保護された定理証明**：状態機械の純粋な核を `spec/` に記述します。エージェントは `spec/Nayutar/Proofs/` の証明本体だけを書け、人間が所有する定理の主張（`spec/Nayutar/Statements/` と `spec/comparator.json`）との一致および公理検査を [`lake comparator`](https://github.com/leanprover/comparator) の `bwrap` サンドボックス内で強制します。
 2. **Lean–Go 差分ランダムテスト（DRT）**：シードつき乱数で生成した操作列を NDJSON で `nayutar-drt` に流し、各ステップの遷移結果を全フィールドについて Go 実装と照合します。変異させた出力や壊した実装を確実に検出する試験も含みます。
@@ -97,7 +97,7 @@ spec {
 
 ### 検証ゲート（G0〜G4）による進行
 
-どの段階も中途半端な「小さな完成品」として閉じず、明確な検証ゲート（G0〜G4）の合格条件を満たしながら段階を進めます（[ADR 0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)）。
+各マイルストーンを個別の完成品として区切るのではなく、機械判定可能な合格条件を持つ **検証ゲート（G0〜G4）** を単位として開発を進めます（[ADR 0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)）。
 
 - **G0（仕様とハーネス — 現在の対象、[ADR 0018](docs/ADR/0018-define-the-g0-verification-gate-pass-criteria.md)）**：ストア／watch と CAS 版所有権の Lean モデル＋DRT、watch 4 不変条件の証明、抽象状態機械上の ESR 証明、決定論的シミュレータ評価、および Kubernetes v1.37 に対する自動差分試験。
 - **G1〜G4（規模・マルチテナント・エコシステム）**：10,000 ノード規模の制御面遅延計測と 72 時間死活障害注入（G1）、50,000 ノード・1,000 テナントでのストア分割比較と `nftables` 対 `cilium/ebpf` 評価（G2）、および上位ワークロード・コントローラ群の検証。
@@ -207,13 +207,13 @@ spec/                   独立した Lean 4 パッケージ（モデル、主張
 - **前提・言語・検証基盤（`accepted`）**：[0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)（動かさない前提） · [0002](docs/ADR/0002-implement-the-core-in-go-and-write-specifications-in-lean-4.md)（Go 中核＋Lean 4 仕様） · [0003](docs/ADR/0003-assure-the-implementation-by-differential-testing-against-lean-models-instead-of-proving-it.md)（DRT とオラクルによる保証） · [0017](docs/ADR/0017-build-the-drt-harness-and-the-theorem-statement-guard-first-and-defer-the-models-the-esr-proof-and-the-kubernetes-oracle.md)（DRT 枠組みと定理保護、[0021](docs/ADR/0021-guard-the-trust-root-of-the-theorem-statements-on-the-server-and-run-the-lean-and-drt-workflows-on-every-change.md) で信頼の根の保護を拡張） · [0018](docs/ADR/0018-define-the-g0-verification-gate-pass-criteria.md)（G0 合格条件）
 - **ストア・キー空間・Watch・死活監視（`accepted` → 実現方式 `proposed`）**：[0004](docs/ADR/0004-fix-a-subset-of-the-etcd-v3-api-without-leases-as-the-store-contract.md)（Lease なしの `Store` 契約） · [0005](docs/ADR/0005-start-on-a-single-etcd-cluster-with-tenant-key-prefixes.md) → [0020](docs/ADR/0020-realize-the-single-etcd-cluster-and-inject-majority-loss-and-network-partitions-into-its-tests.md)（単一 3 台 etcd と障害注入） · [0006](docs/ADR/0006-put-the-tenant-at-the-top-of-the-key-space-and-keep-namespaces-out-of-keys.md) → [0022](docs/ADR/0022-realize-the-key-space-with-a-strict-segment-grammar-a-key-codec-and-a-fenced-tenant-registry.md)（テナント最上位キー空間とフェンスつき登録簿） · [0007](docs/ADR/0007-serve-watches-from-a-per-tenant-cache-with-revisions-bookmarks-and-watch-list.md) → [0023](docs/ADR/0023-realize-the-watch-cache-as-a-library-with-a-persistent-b-tree-closed-revisions-and-an-in-process-compaction-bound.md)（テナント別 watch キャッシュ） · [0008](docs/ADR/0008-keep-node-liveness-as-soft-state-and-write-only-confirmed-transitions-to-the-store.md) → [0024](docs/ADR/0024-realize-node-liveness-with-an-exact-phi-test-a-deterministic-detector-core-a-node-registry-and-a-rate-limited-eviction-permit.md)（ソフトステート死活監視）
 - **リソース封筒・参照検査（`accepted` → 実現方式 `proposed`）**：[0009](docs/ADR/0009-fix-the-resource-envelope-to-meta-spec-and-status.md) → [0025](docs/ADR/0025-realize-the-resource-envelope-with-a-lowercase-kind-two-write-entrances-a-pure-transition-core-and-an-object-store-binding.md)（`meta`・`spec`・`status` 封筒） · [0010](docs/ADR/0010-check-references-at-write-time-and-keep-them-inside-a-tenant.md) → [0026](docs/ADR/0026-realize-reference-checking-with-a-pure-check-core-a-reference-schema-table-cedar-authorization-and-a-back-reference-index-in-the-object-transaction.md)（書き込み時の参照検査と Cedar 認可）
-- **今後実装する領域（`proposed`）**：[0011](docs/ADR/0011-express-ordered-record-sets-with-an-explicit-integer-order-leaf.md)（順序付きレコード集合） · [0012](docs/ADR/0012-use-lkal-json-on-the-wire-first-and-add-untagged-deterministic-cbor-later.md)（LKAL-JSON・Patch・CBOR ワイヤ形式） · [0013](docs/ADR/0013-store-leaf-path-ownership-under-its-own-key-and-update-it-in-the-same-transaction.md)（同一 `Txn` の葉パス所有権） · [0014](docs/ADR/0014-drive-containerd-directly-without-cri.md)（CRI を介さない containerd 直接駆動） · [0015](docs/ADR/0015-route-all-external-effects-through-simulation-interfaces-and-pick-the-simulator-after-evaluating-gosim.md)（シミュレーション用 I/O 境界） · [0016](docs/ADR/0016-enforce-default-deny-network-policy-with-nftables-first.md)（既定拒否の `nftables` ネットワークポリシー）
+- **今後実装する領域（`proposed`）**：[0011](docs/ADR/0011-express-ordered-record-sets-with-an-explicit-integer-order-leaf.md)（順序付きレコード集合） · [0012](docs/ADR/0012-use-lkal-json-on-the-wire-first-and-add-untagged-deterministic-cbor-later.md)（LKAL-JSON・Patch・CBOR ワイヤ形式） · [0013](docs/ADR/0013-store-leaf-path-ownership-under-its-own-key-and-update-it-in-the-same-transaction.md)（同一 `Txn` の葉パス所有権） · [0014](docs/ADR/0014-drive-containerd-directly-without-cri.md)（containerd の直接駆動） · [0015](docs/ADR/0015-route-all-external-effects-through-simulation-interfaces-and-pick-the-simulator-after-evaluating-gosim.md)（シミュレーション用 I/O 境界） · [0016](docs/ADR/0016-enforce-default-deny-network-policy-with-nftables-first.md)（既定拒否の `nftables` ネットワークポリシー）
 
 ---
 
 ## 先行研究・関連プロジェクトへの謝辞
 
-Nayutar は [LKAL](https://github.com/Kaikei-e/LKAL)、[kisage](https://github.com/Kaikei-e/kisage)、[DocDag](https://github.com/Kaikei-e/DocDag)、[etcd](https://etcd.io/)、[Lean 4](https://lean-lang.org/) および [`comparator`](https://github.com/leanprover/comparator)、[Cedar（`cedar-go`）](https://github.com/cedar-policy/cedar-go)、[Porcupine](https://github.com/anishathalye/porcupine) の上に成り立っています。また個々の設計判断では、キャッシュからの一貫読み取り（[KEP-2340](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/2340-Consistent-reads-from-cache/README.md)）とストリーミング watch-list（[KEP-3157](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/3157-watch-list/README.md)）、`APIExport` / `APIBinding` の `identityHash` 分離（[kcp](https://docs.kcp.io/kcp/main/concepts/apis/exporting-apis/)）、Operator の越境参照脆弱性の分類（["Breaking the Bulkhead", NDSS 2026](https://arxiv.org/abs/2507.03387)）、φ accrual 障害検知器（[Hayashibara et al., SRDS 2004](https://doi.org/10.1109/RELDIS.2004.1353004) および [Apache Pekko](https://github.com/apache/pekko)）、SWIM の間接プローブ（[Das et al., DSN 2002](https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf)）、Lifeguard の自己健全性認識（[Dadgar et al., 2017](https://arxiv.org/abs/1707.00788)）、ならびにコントローラ合成の rely-guarantee 設計原則（[Welder](https://doi.org/10.1145/3830418.3843868)、コード・ツールチェーン依存なしの参照文献）などの一次仕様・研究を参照しています。詳細は各 ADR の根拠節を参照してください。
+Nayutar は [LKAL](https://github.com/Kaikei-e/LKAL)、[kisage](https://github.com/Kaikei-e/kisage)、[DocDag](https://github.com/Kaikei-e/DocDag)、[etcd](https://etcd.io/)、[Lean 4](https://lean-lang.org/) および [`comparator`](https://github.com/leanprover/comparator)、[Cedar（`cedar-go`）](https://github.com/cedar-policy/cedar-go)、[Porcupine](https://github.com/anishathalye/porcupine) の上に成り立っています。また個々の設計判断では、キャッシュからの一貫読み取り（[KEP-2340](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/2340-Consistent-reads-from-cache/README.md)）とストリーミング watch-list（[KEP-3157](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/3157-watch-list/README.md)）、`APIExport` / `APIBinding` の `identityHash` 分離（[kcp](https://docs.kcp.io/kcp/main/concepts/apis/exporting-apis/)）、Operator の越境参照脆弱性の分類（["Breaking the Bulkhead", NDSS 2026](https://arxiv.org/abs/2507.03387)）、φ accrual 障害検知器（[Hayashibara et al., SRDS 2004](https://doi.org/10.1109/RELDIS.2004.1353004) および [Apache Pekko](https://github.com/apache/pekko)）、SWIM の間接プローブ（[Das et al., DSN 2002](https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf)）、Lifeguard の自己健全性認識（[Dadgar et al., 2017](https://arxiv.org/abs/1707.00788)）、ならびにコントローラ合成の rely-guarantee 設計原則（[Welder](https://doi.org/10.1145/3830418.3843868)、設計原則の参照文献として位置づけ、コードやツールチェーンには依存していません）などの一次仕様・研究を参照しています。詳細は各 ADR の根拠節を参照してください。
 
 ## コントリビューションとセキュリティ
 
