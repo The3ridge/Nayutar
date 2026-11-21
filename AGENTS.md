@@ -105,7 +105,6 @@ python3 scripts/tests/test-agent-harness.py && python3 scripts/agent-harness/har
 - `git push`、PR の作成・マージ、ワークフローの実行・再実行・キャンセルは、その操作を明示的に頼まれたときだけ行う。コミットの依頼を push の許可と読み替えない。
 - `--no-verify` などでフックや署名を飛ばさない。
 
-## スキルと agy-orch
+## スキル
 
 - 設計案を ADR と突き合わせて詰めるときは `grill-with-docs`、Web で一次資料を調べるときは `web-researcher` を使う（Codex には `.agents/skills/` から見える）。
-- `.mcp.json` / `.codex/config.toml`（どちらも gitignore 済み）に agy-orch MCP（`antigravity`）を登録している。ホストエージェントは分解とレビューを担い、実装を agy ワーカーに渡してよい。モデルは MCP 登録の env が決めるので、呼び出しで `model` や `effort` を指定しない。`antigravity_batch` はクリーンな作業ツリーが必要で、ワーカーはコミット済みのファイルしか見ない。
