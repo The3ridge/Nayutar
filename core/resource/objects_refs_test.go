@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -86,14 +87,96 @@ func mustCedarAuthorizer(t *testing.T, policySrc string) *refcedar.Authorizer {
 	return auth
 }
 
-func testRefSchema() refs.Schema {
-	return refs.Schema{
-		"workload": {
-			{Path: []string{"spec", "*"}, Targets: []string{"secret", "configmap", "workload", "widget.example.com"}},
-			{Path: []string{"spec", "secrets", "*"}, Targets: []string{"secret"}},
-		},
-		"secret": {},
+var refSuiteSchemas = func() resource.Schemas {
+	mustCompile := func(name, src string) *resource.KindSchema {
+		ks, err := resource.CompileKindSchema(name, []byte(src))
+		if err != nil {
+			panic(fmt.Sprintf("compile %s: %v", name, err))
+		}
+		return ks
 	}
+	var b strings.Builder
+	b.WriteString(`@lkal "0.1"
+lkal-schema = "0.2"
+
+def "any-ref" {
+  type = .ref
+  targets = [&secret, &configmap, &workload, &widget.example.com]
+}
+
+root {
+  field "spec" {
+    type = .record
+    field "primary" { use = &def/any-ref }
+    field "secondary" { use = &def/any-ref }
+    field "config" { use = &def/any-ref }
+    field "priv" { use = &def/any-ref }
+    field "forbiddenSecret" { use = &def/any-ref }
+    field "r" { use = &def/any-ref }
+    field "db" { use = &def/any-ref }
+    field "s" { use = &def/any-ref }
+    field "self" { use = &def/any-ref }
+    field "b" { use = &def/any-ref }
+    field "c" { use = &def/any-ref }
+    field "list" {
+      type = .list
+      items { use = &def/any-ref }
+    }
+    field "a" {
+      type = .list
+      items { use = &def/any-ref }
+    }
+    field "secrets" {
+      type = .map
+      value {
+        type = .ref
+        targets = [&secret]
+      }
+    }
+    field "count" { type = .int }
+    field "n" { type = .int }
+`)
+	for i := range 10 {
+		fmt.Fprintf(&b, "    field \"f%02d\" { use = &def/any-ref }\n", i)
+	}
+	b.WriteString(`  }
+  field "status" {
+    type = .record
+    open = true
+  }
+}
+`)
+	return resource.Schemas{
+		"workload": mustCompile("workload.schema.lkal", b.String()),
+		"secret": mustCompile("secret.schema.lkal", `@lkal "0.1"
+lkal-schema = "0.2"
+root {
+  field "spec" {
+    type = .record
+    field "data" { type = .string }
+  }
+}
+`),
+		"configmap": mustCompile("configmap.schema.lkal", `@lkal "0.1"
+lkal-schema = "0.2"
+root {
+  field "spec" {
+    type = .record
+    field "key" { type = .string }
+  }
+}
+`),
+		"widget.example.com": mustCompile("widget.schema.lkal", `@lkal "0.1"
+lkal-schema = "0.2"
+root {
+  field "spec" { type = .record }
+}
+`),
+	}
+}()
+
+func testRefSchemas() resource.Schemas {
+	return maps.Clone(refSuiteSchemas)
 }
 
 func secretCand(name string, labels ...lkal.Field) lkal.Record {
@@ -229,7 +312,7 @@ func checkObjectsRefsSuite(t *testing.T, newRoot func(*testing.T) store.Store) {
 		st := openRegisteredTenant(t, ctx, newRoot(t), "acme")
 		cfg, _ := testObjectsConfig()
 		cfg.Tenant = "acme"
-		cfg.References = testRefSchema()
+		cfg.Schemas = testRefSchemas()
 		cfg.Authorizer = mustCedarAuthorizer(t, defaultCedarPS)
 		objs := resource.NewObjects(st, cfg)
 
@@ -362,7 +445,7 @@ permit(principal, action == Nayutar::Action::"Reference", resource) when { resou
 		st := openRegisteredTenant(t, ctx, newRoot(t), "acme")
 		cfg, _ := testObjectsConfig()
 		cfg.Tenant = "acme"
-		cfg.References = testRefSchema()
+		cfg.Schemas = testRefSchemas()
 		cfg.Authorizer = mustCedarAuthorizer(t, defaultCedarPS)
 		objs := resource.NewObjects(st, cfg)
 
@@ -405,7 +488,7 @@ permit(principal, action == Nayutar::Action::"Reference", resource) when { resou
 		st := openRegisteredTenant(t, ctx, newRoot(t), "acme")
 		cfg, _ := testObjectsConfig()
 		cfg.Tenant = "acme"
-		cfg.References = testRefSchema()
+		cfg.Schemas = testRefSchemas()
 		cfg.Authorizer = mustCedarAuthorizer(t, defaultCedarPS)
 		baseObjs := resource.NewObjects(st, cfg)
 
@@ -443,7 +526,7 @@ permit(principal, action == Nayutar::Action::"Reference", resource) when { resou
 		st := openRegisteredTenant(t, ctx, newRoot(t), "acme")
 		cfg, _ := testObjectsConfig()
 		cfg.Tenant = "acme"
-		cfg.References = testRefSchema()
+		cfg.Schemas = testRefSchemas()
 		cfg.Authorizer = mustCedarAuthorizer(t, defaultCedarPS)
 		objs := resource.NewObjects(st, cfg)
 
@@ -487,7 +570,7 @@ permit(principal, action == Nayutar::Action::"Reference", resource) when { resou
 		allowAllAuth := mustCedarAuthorizer(t, `permit(principal == Nayutar::User::"alice", action == Nayutar::Action::"Reference", resource);`)
 		alphaCfg, _ := testObjectsConfig()
 		alphaCfg.Tenant = "alpha"
-		alphaCfg.References = testRefSchema()
+		alphaCfg.Schemas = testRefSchemas()
 		alphaCfg.Authorizer = allowAllAuth
 		betaCfg := alphaCfg
 		betaCfg.Tenant = "beta"
@@ -667,7 +750,7 @@ func TestObjectsReferences(t *testing.T) {
 		st := memstore.New()
 		cfg, _ := testObjectsConfig()
 		cfg.Tenant = "acme"
-		cfg.References = testRefSchema()
+		cfg.Schemas = testRefSchemas()
 		cfg.Authorizer = &fakeAuthorizer{}
 		objs := resource.NewObjects(st, cfg)
 
@@ -765,7 +848,7 @@ func TestObjectsReferences(t *testing.T) {
 		auth := &fakeAuthorizer{}
 		cfg, _ := testObjectsConfig()
 		cfg.Tenant = "acme"
-		cfg.References = testRefSchema()
+		cfg.Schemas = testRefSchemas()
 		cfg.Authorizer = auth
 		objs := resource.NewObjects(st, cfg)
 
@@ -874,7 +957,7 @@ func TestObjectsReferences(t *testing.T) {
 		auth := &fakeAuthorizer{}
 		cfg, _ := testObjectsConfig()
 		cfg.Tenant = "acme"
-		cfg.References = testRefSchema()
+		cfg.Schemas = testRefSchemas()
 		cfg.Authorizer = auth
 		objs := resource.NewObjects(st, cfg)
 
@@ -1027,7 +1110,7 @@ func TestObjectsReferences(t *testing.T) {
 		auth := &fakeAuthorizer{}
 		cfg, _ := testObjectsConfig()
 		cfg.Tenant = "tenant-x"
-		cfg.References = testRefSchema()
+		cfg.Schemas = testRefSchemas()
 		cfg.Authorizer = auth
 		objs := resource.NewObjects(st, cfg)
 
@@ -1110,7 +1193,10 @@ func TestObjectsReferences(t *testing.T) {
 
 			badCfg, _ := testObjectsConfig()
 			badCfg.Tenant = "acme"
-			badCfg.References = refs.Schema{"secret.core": {}}
+			badCfg.Schemas = resource.Schemas{
+				"secret.core": testRefSchemas()["secret"],
+				"workload":    testRefSchemas()["workload"],
+			}
 			badObjs := resource.NewObjects(st, badCfg)
 
 			revBefore, err := st.CurrentRev(ctx)
@@ -1134,7 +1220,7 @@ func TestObjectsReferences(t *testing.T) {
 			auth := &fakeAuthorizer{}
 			seedCfg, _ := testObjectsConfig()
 			seedCfg.Tenant = "acme"
-			seedCfg.References = testRefSchema()
+			seedCfg.Schemas = testRefSchemas()
 			seedCfg.Authorizer = auth
 			seedObjs := resource.NewObjects(st, seedCfg)
 			if _, err := seedObjs.Create(ctx, testPrincipal, secretCand("db")); err != nil {
@@ -1147,7 +1233,7 @@ func TestObjectsReferences(t *testing.T) {
 			for i, badTenant := range []string{"", "ACME", "bad/tenant"} {
 				badCfg, _ := testObjectsConfig()
 				badCfg.Tenant = badTenant
-				badCfg.References = testRefSchema()
+				badCfg.Schemas = testRefSchemas()
 				badCfg.Authorizer = auth
 				badObjs := resource.NewObjects(st, badCfg)
 
@@ -1183,7 +1269,7 @@ func TestObjectsReferences(t *testing.T) {
 			// When Authorizer == nil, added occurrences fail with ErrDenied, not ErrInternal.
 			nilAuthCfg, _ := testObjectsConfig()
 			nilAuthCfg.Tenant = ""
-			nilAuthCfg.References = testRefSchema()
+			nilAuthCfg.Schemas = testRefSchemas()
 			nilAuthObjs := resource.NewObjects(st, nilAuthCfg)
 			_, err := nilAuthObjs.Create(ctx, testPrincipal, workloadRefCand("nil-auth-bad-tenant", f("s", lkal.Ref{"secret", "db"})))
 			assertRefsErr(t, err, refs.ErrDenied)

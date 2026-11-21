@@ -1,0 +1,18 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:sys/evictions/0.1"
+version = "0.1.0"
+doc = "Schema for the cluster-wide eviction budget under /sys/liveness/evictions."
+
+root {
+  field "granted" {
+    type = .list
+    required = true
+    items {
+      type = .int
+      min = 0
+      max = 9007199254740991
+    }
+  }
+}

@@ -116,9 +116,9 @@ jobs:
           cache: false
 
       - name: Install lkal
-        run: go install github.com/Kaikei-e/LKAL/cmd/lkal@v0.0.0-20261114132324-790bdd412dd7
+        run: go install github.com/Kaikei-e/LKAL/cmd/lkal@v0.2.0
 
-      - name: Check and format-check every .lkal file
+      - name: Check, format-check and schema-check every .lkal file
         run: |
           set -euo pipefail
           mapfile -t files < <(git ls-files '*.lkal')
@@ -132,10 +132,20 @@ jobs:
             printf 'not in canonical form (run lkal fmt -w):\n%s\n' "${unformatted}"
             exit 1
           fi
+          mapfile -t schemas < <(git ls-files '*.schema.lkal')
+          if [ "${#schemas[@]}" -eq 0 ]; then
+            echo "no .schema.lkal files"
+            exit 1
+          fi
+          lkal schema check "${schemas[@]}"
+          for schema_file in "${schemas[@]}"; do
+            paired="${schema_file%.schema.lkal}.lkal"
+            if [ -f "${paired}" ]; then
+              lkal check --schema "${schema_file}" "${paired}"
+            fi
+          done
 
       - name: Decode the development etcd declaration
-        env:
-          NAYUTAR_REQUIRE_LKAL: "1"
         run: |
           set -euo pipefail
           go test -count=1 -v -run '^TestDevDeclarationDecodes$' ./cmd/dev-etcd | tee "${RUNNER_TEMP}/dev-declaration.log"

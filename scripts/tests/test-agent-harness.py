@@ -874,6 +874,22 @@ if len(args) >= 3 and args[0] == "fmt" and args[1] == "-w":
         sys.exit(1)
     p.write_text(text.strip() + "\\n", encoding="utf-8")
     sys.exit(0)
+if len(args) >= 3 and args[0] == "schema" and args[1] == "check":
+    p = pathlib.Path(args[2])
+    if "INVALID_SCHEMA" in p.read_text(encoding="utf-8"):
+        sys.stderr.write("lkal schema check: L601 invalid schema\\n")
+        sys.exit(1)
+    sys.exit(0)
+if len(args) >= 4 and args[0] == "check" and args[1] == "--schema":
+    schema_p = pathlib.Path(args[2])
+    doc_p = pathlib.Path(args[3])
+    if "INVALID_SCHEMA" in schema_p.read_text(encoding="utf-8"):
+        sys.stderr.write("lkal check --schema: L601 invalid schema\\n")
+        sys.exit(1)
+    if "SCHEMA_VIOLATION" in doc_p.read_text(encoding="utf-8"):
+        sys.stderr.write("lkal check --schema: L501 type mismatch\\n")
+        sys.exit(1)
+    sys.exit(0)
 if len(args) >= 2 and args[0] == "check":
     p = pathlib.Path(args[1])
     if "INVALID_CHECK" in p.read_text(encoding="utf-8"):
@@ -944,6 +960,68 @@ sys.exit(0)
     check(
         "exits 2 when lkal check fails on MultiEdit",
         res.returncode == 2 and "lkal check: validation error" in res.stderr,
+        res.stderr.strip(),
+    )
+
+    paired_schema = post_repo / "config" / "paired.schema.lkal"
+    paired_doc = post_repo / "config" / "paired.lkal"
+    _write(post_repo, "config/paired.schema.lkal", 'lkal-schema = "0.2"\nroot {}\n')
+    _write(post_repo, "config/paired.lkal", "x = 1\n")
+
+    log_file.write_text("", encoding="utf-8")
+    res = run_script(
+        POST_EDIT_SCRIPT,
+        claude_edit("Edit", str(paired_schema), event="PostToolUse"),
+        env=fake_env,
+        cwd=post_repo,
+    )
+    schema_invocations = log_file.read_text(encoding="utf-8")
+    check(
+        "runs lkal schema check and paired lkal check --schema on edited .schema.lkal file",
+        res.returncode == 0
+        and f"lkal schema check {paired_schema}" in schema_invocations
+        and f"lkal check --schema {paired_schema} {paired_doc}" in schema_invocations,
+        res.stderr.strip(),
+    )
+
+    log_file.write_text("", encoding="utf-8")
+    res = run_script(
+        POST_EDIT_SCRIPT,
+        claude_edit("Edit", str(paired_doc), event="PostToolUse"),
+        env=fake_env,
+        cwd=post_repo,
+    )
+    doc_invocations = log_file.read_text(encoding="utf-8")
+    check(
+        "runs lkal check --schema when sibling .schema.lkal exists",
+        res.returncode == 0 and f"lkal check --schema {paired_schema} {paired_doc}" in doc_invocations,
+        res.stderr.strip(),
+    )
+
+    _write(post_repo, "config/paired.lkal", "SCHEMA_VIOLATION\n")
+    res = run_script(
+        POST_EDIT_SCRIPT,
+        claude_edit("Edit", str(paired_doc), event="PostToolUse"),
+        env=fake_env,
+        cwd=post_repo,
+    )
+    check(
+        "exits 2 when paired lkal check --schema fails",
+        res.returncode == 2 and "L501 type mismatch" in res.stderr,
+        res.stderr.strip(),
+    )
+
+    bad_schema = post_repo / "config" / "invalid.schema.lkal"
+    _write(post_repo, "config/invalid.schema.lkal", "INVALID_SCHEMA\n")
+    res = run_script(
+        POST_EDIT_SCRIPT,
+        claude_edit("Write", str(bad_schema), event="PostToolUse"),
+        env=fake_env,
+        cwd=post_repo,
+    )
+    check(
+        "exits 2 when lkal schema check fails on .schema.lkal",
+        res.returncode == 2 and "L601 invalid schema" in res.stderr,
         res.stderr.strip(),
     )
 
@@ -1046,6 +1124,32 @@ sys.exit(0)
             broken_lkal_res.returncode == 2 and bool(broken_lkal_res.stderr.strip()),
             broken_lkal_res.stderr.strip(),
         )
+        ver_probe = subprocess.run(["lkal", "version"], capture_output=True, text=True, check=False)
+        if ver_probe.returncode == 0:
+            dev_schema_src = (ROOT / "config" / "dev.schema.lkal").read_text(encoding="utf-8")
+            _write(real_lkal_dir, "dev.schema.lkal", dev_schema_src)
+            _write(real_lkal_dir, "dev.lkal", sample_src)
+            real_schema_ok = run_script(
+                POST_EDIT_SCRIPT,
+                claude_edit("Write", str(real_lkal_dir / "dev.lkal"), event="PostToolUse"),
+                cwd=real_lkal_dir,
+            )
+            check(
+                "real lkal v0.2 integration validates paired dev.lkal against dev.schema.lkal",
+                real_schema_ok.returncode == 0,
+                real_schema_ok.stderr.strip(),
+            )
+            _write(real_lkal_dir, "dev.lkal", '@lkal "0.1"\netcd { extra = 1 }\n')
+            real_schema_bad = run_script(
+                POST_EDIT_SCRIPT,
+                claude_edit("Write", str(real_lkal_dir / "dev.lkal"), event="PostToolUse"),
+                cwd=real_lkal_dir,
+            )
+            check(
+                "real lkal v0.2 integration rejects schema violation in paired dev.lkal",
+                real_schema_bad.returncode == 2 and "L5" in real_schema_bad.stderr,
+                real_schema_bad.stderr.strip(),
+            )
 
     if shutil.which("docdag") is not None:
         real_repo = tmp / "real_docdag_repo"

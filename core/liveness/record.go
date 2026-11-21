@@ -2,14 +2,42 @@ package liveness
 
 import (
 	"bytes"
-	"encoding/json/v2"
+	_ "embed"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 
+	"github.com/Kaikei-e/LKAL"
+	"github.com/Kaikei-e/LKAL/schema"
 	"github.com/Kaikei-e/Nayutar/core/liveness/detector"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 )
+
+//go:embed node.schema.lkal
+var nodeSchemaBytes []byte
+
+//go:embed evictions.schema.lkal
+var evictionsSchemaBytes []byte
+
+var (
+	nodeSchema      *schema.Schema
+	evictionsSchema *schema.Schema
+)
+
+func init() {
+	ns, err := schema.Compile("node.schema.lkal", nodeSchemaBytes)
+	if err != nil {
+		panic("liveness: embedded node.schema.lkal failed to compile: " + err.Error())
+	}
+	nodeSchema = ns
+
+	es, err := schema.Compile("evictions.schema.lkal", evictionsSchemaBytes)
+	if err != nil {
+		panic("liveness: embedded evictions.schema.lkal failed to compile: " + err.Error())
+	}
+	evictionsSchema = es
+}
 
 const (
 	// EvictionWindow is the sliding window duration in milliseconds for eviction permits.
@@ -17,8 +45,8 @@ const (
 	// EvictionPercent is the percentage of nodes allowed eviction permits per window.
 	EvictionPercent = 1
 
-	lkalVersion = "0.1"
-	maxSafeInt  = int64(1) << 53
+	emptyLKALJSON = `{"$lkal":"0.1"}`
+	maxSafeInt    = int64(1) << 53
 )
 
 var (
@@ -95,48 +123,51 @@ func parseState(s string) (detector.State, error) {
 	}
 }
 
-type recordDoc struct {
-	Lkal      *string   `json:"$lkal"`
-	Evictable *bool     `json:"evictable"`
-	Rack      *string   `json:"rack"`
-	Since     *int64    `json:"since"`
-	State     *stateDoc `json:"state"`
-}
-
-type stateDoc struct {
-	Enum *string `json:"$enum"`
-}
-
-type encodeRecordDoc struct {
-	Lkal      string         `json:"$lkal"`
-	Evictable bool           `json:"evictable"`
-	Rack      string         `json:"rack"`
-	Since     int64          `json:"since"`
-	State     encodeStateDoc `json:"state"`
-}
-
-type encodeStateDoc struct {
-	Enum string `json:"$enum"`
+func encodeCompactLKAL(s *schema.Schema, doc lkal.Record) ([]byte, error) {
+	if err := s.ValidateValue(doc); err != nil {
+		return nil, err
+	}
+	f, err := lkal.FromJSON([]byte(emptyLKALJSON))
+	if err != nil {
+		return nil, err
+	}
+	for _, fld := range doc.Fields {
+		if err := f.Set(fld.Key, fld.Value); err != nil {
+			return nil, err
+		}
+	}
+	raw, err := lkal.ToJSON(f, false)
+	if err != nil {
+		return nil, err
+	}
+	v := jsontext.Value(raw)
+	if err := v.Compact(); err != nil {
+		return nil, err
+	}
+	return []byte(v), nil
 }
 
 func encodeRecord(rec Record) ([]byte, error) {
 	if err := validateRack(rec.Rack); err != nil {
 		return nil, err
 	}
-	if rec.Since < 0 || rec.Since >= maxSafeInt {
-		return nil, fmt.Errorf("%w: since %d out of range [0, 2^53)", ErrCorruptRecord, rec.Since)
-	}
 	st, err := stateString(rec.State)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(encodeRecordDoc{
-		Lkal:      lkalVersion,
-		Evictable: rec.Evictable,
-		Rack:      rec.Rack,
-		Since:     rec.Since,
-		State:     encodeStateDoc{Enum: st},
-	})
+	doc := lkal.Record{
+		Fields: []lkal.Field{
+			{Key: "evictable", Value: lkal.Bool(rec.Evictable)},
+			{Key: "rack", Value: lkal.String(rec.Rack)},
+			{Key: "since", Value: lkal.Int(rec.Since)},
+			{Key: "state", Value: lkal.Enum(st)},
+		},
+	}
+	raw, err := encodeCompactLKAL(nodeSchema, doc)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCorruptRecord, err)
+	}
+	return raw, nil
 }
 
 // DecodeRecord decodes the value stored at a node key (used by watchers).
@@ -145,31 +176,42 @@ func DecodeRecord(node string, value []byte, modRev store.Rev) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	var doc recordDoc
-	if err := json.Unmarshal(value, &doc, json.RejectUnknownMembers(true)); err != nil {
+	f, err := lkal.FromJSON(value)
+	if err != nil {
 		return Record{}, fmt.Errorf("%w: key %s: %v", ErrCorruptRecord, key, err)
 	}
-	if doc.Lkal == nil || *doc.Lkal != lkalVersion ||
-		doc.Evictable == nil || doc.Rack == nil || doc.Since == nil ||
-		doc.State == nil || doc.State.Enum == nil {
-		return Record{}, fmt.Errorf("%w: key %s: unexpected schema or fields", ErrCorruptRecord, key)
-	}
-	if *doc.Since < 0 || *doc.Since >= maxSafeInt {
-		return Record{}, fmt.Errorf("%w: key %s: since %d out of range [0, 2^53)", ErrCorruptRecord, key, *doc.Since)
-	}
-	if err := validateRack(*doc.Rack); err != nil {
+	if err := nodeSchema.Validate(f); err != nil {
 		return Record{}, fmt.Errorf("%w: key %s: %v", ErrCorruptRecord, key, err)
 	}
-	st, err := parseState(*doc.State.Enum)
+
+	var (
+		evictable bool
+		rack      string
+		since     int64
+		stateName string
+	)
+	for _, fld := range f.Data().Fields {
+		switch fld.Key {
+		case "evictable":
+			evictable = bool(fld.Value.(lkal.Bool))
+		case "rack":
+			rack = string(fld.Value.(lkal.String))
+		case "since":
+			since = int64(fld.Value.(lkal.Int))
+		case "state":
+			stateName = string(fld.Value.(lkal.Enum))
+		}
+	}
+	st, err := parseState(stateName)
 	if err != nil {
 		return Record{}, fmt.Errorf("%w: key %s: %v", ErrCorruptRecord, key, err)
 	}
 	rec := Record{
 		Node:      node,
 		State:     st,
-		Since:     *doc.Since,
-		Rack:      *doc.Rack,
-		Evictable: *doc.Evictable,
+		Since:     since,
+		Rack:      rack,
+		Evictable: evictable,
 		ModRev:    modRev,
 	}
 	canonical, err := encodeRecord(rec)
@@ -179,57 +221,56 @@ func DecodeRecord(node string, value []byte, modRev store.Rev) (Record, error) {
 	return rec, nil
 }
 
-type budgetDoc struct {
-	Lkal    *string `json:"$lkal"`
-	Granted []int64 `json:"granted"`
-}
-
-type encodeBudgetDoc struct {
-	Lkal    string  `json:"$lkal"`
-	Granted []int64 `json:"granted"`
-}
-
 func encodeBudget(granted []int64) ([]byte, error) {
-	if granted == nil {
-		granted = []int64{}
-	}
+	items := make(lkal.List, len(granted))
 	var prev int64 = -1
-	for _, g := range granted {
-		if g < 0 || g >= maxSafeInt {
-			return nil, fmt.Errorf("%w: key %s: timestamp %d out of range [0, 2^53)", ErrCorruptRecord, keyspace.EvictionBudgetKey, g)
-		}
+	for i, g := range granted {
 		if g < prev {
 			return nil, fmt.Errorf("%w: key %s: timestamps not ascending", ErrCorruptRecord, keyspace.EvictionBudgetKey)
 		}
 		prev = g
+		items[i] = lkal.Int(g)
 	}
-	return json.Marshal(encodeBudgetDoc{
-		Lkal:    lkalVersion,
-		Granted: granted,
-	})
+	doc := lkal.Record{
+		Fields: []lkal.Field{
+			{Key: "granted", Value: items},
+		},
+	}
+	raw, err := encodeCompactLKAL(evictionsSchema, doc)
+	if err != nil {
+		return nil, fmt.Errorf("%w: key %s: %v", ErrCorruptRecord, keyspace.EvictionBudgetKey, err)
+	}
+	return raw, nil
 }
 
 func decodeBudget(key string, value []byte) ([]int64, error) {
-	var doc budgetDoc
-	if err := json.Unmarshal(value, &doc, json.RejectUnknownMembers(true)); err != nil {
+	f, err := lkal.FromJSON(value)
+	if err != nil {
 		return nil, fmt.Errorf("%w: key %s: %v", ErrCorruptRecord, key, err)
 	}
-	if doc.Lkal == nil || *doc.Lkal != lkalVersion || doc.Granted == nil {
-		return nil, fmt.Errorf("%w: key %s: unexpected schema or fields", ErrCorruptRecord, key)
+	if err := evictionsSchema.Validate(f); err != nil {
+		return nil, fmt.Errorf("%w: key %s: %v", ErrCorruptRecord, key, err)
 	}
-	var prev int64 = -1
-	for _, g := range doc.Granted {
-		if g < 0 || g >= maxSafeInt {
-			return nil, fmt.Errorf("%w: key %s: timestamp %d out of range [0, 2^53)", ErrCorruptRecord, key, g)
+
+	var list lkal.List
+	for _, fld := range f.Data().Fields {
+		if fld.Key == "granted" {
+			list = fld.Value.(lkal.List)
 		}
+	}
+	granted := make([]int64, len(list))
+	var prev int64 = -1
+	for i, el := range list {
+		g := int64(el.(lkal.Int))
 		if g < prev {
 			return nil, fmt.Errorf("%w: key %s: timestamps not ascending", ErrCorruptRecord, key)
 		}
 		prev = g
+		granted[i] = g
 	}
-	canonical, err := encodeBudget(doc.Granted)
+	canonical, err := encodeBudget(granted)
 	if err != nil || !bytes.Equal(canonical, value) {
 		return nil, fmt.Errorf("%w: key %s: non-canonical encoding", ErrCorruptRecord, key)
 	}
-	return doc.Granted, nil
+	return granted, nil
 }

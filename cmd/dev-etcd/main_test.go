@@ -2,25 +2,25 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Kaikei-e/LKAL"
 )
 
 func TestDecodeClusterConfig(t *testing.T) {
-	validJSON := `{
-		"etcd": {
-			"version": "3.6.16",
-			"member": {
-				"m0": {"client-url": "http://127.0.0.1:12379", "peer-url": "http://127.0.0.1:12380"},
-				"m1": {"client-url": "http://127.0.0.1:22379", "peer-url": "http://127.0.0.1:22380"},
-				"m2": {"client-url": "http://127.0.0.1:32379", "peer-url": "http://127.0.0.1:32380"}
-			}
-		}
-	}`
+	validLKAL := `@lkal "0.1"
+
+etcd {
+  version = "3.6.16"
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { client-url = "http://127.0.0.1:22379", peer-url = "http://127.0.0.1:22380" }
+  member "m2" { client-url = "http://127.0.0.1:32379", peer-url = "http://127.0.0.1:32380" }
+}
+`
 
 	tests := []struct {
 		name    string
@@ -30,7 +30,7 @@ func TestDecodeClusterConfig(t *testing.T) {
 	}{
 		{
 			name:  "valid declaration",
-			input: validJSON,
+			input: validLKAL,
 			want: clusterConfig{
 				Version: "3.6.16",
 				Members: []memberConfig{
@@ -42,88 +42,115 @@ func TestDecodeClusterConfig(t *testing.T) {
 		},
 		{
 			name: "missing version",
-			input: `{
-				"etcd": {
-					"member": {
-						"m0": {"client-url": "http://127.0.0.1:12379", "peer-url": "http://127.0.0.1:12380"},
-						"m1": {"client-url": "http://127.0.0.1:22379", "peer-url": "http://127.0.0.1:22380"},
-						"m2": {"client-url": "http://127.0.0.1:32379", "peer-url": "http://127.0.0.1:32380"}
-					}
-				}
-			}`,
-			wantErr: "version",
+			input: `@lkal "0.1"
+etcd {
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { client-url = "http://127.0.0.1:22379", peer-url = "http://127.0.0.1:22380" }
+  member "m2" { client-url = "http://127.0.0.1:32379", peer-url = "http://127.0.0.1:32380" }
+}
+`,
+			wantErr: "L502",
+		},
+		{
+			name: "whitespace version",
+			input: `@lkal "0.1"
+etcd {
+  version = "  "
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { client-url = "http://127.0.0.1:22379", peer-url = "http://127.0.0.1:22380" }
+  member "m2" { client-url = "http://127.0.0.1:32379", peer-url = "http://127.0.0.1:32380" }
+}
+`,
+			wantErr: "L505",
 		},
 		{
 			name: "2 members",
-			input: `{
-				"etcd": {
-					"version": "3.6.16",
-					"member": {
-						"m0": {"client-url": "http://127.0.0.1:12379", "peer-url": "http://127.0.0.1:12380"},
-						"m1": {"client-url": "http://127.0.0.1:22379", "peer-url": "http://127.0.0.1:22380"}
-					}
-				}
-			}`,
-			wantErr: "expected 3 etcd members, got 2",
+			input: `@lkal "0.1"
+etcd {
+  version = "3.6.16"
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { client-url = "http://127.0.0.1:22379", peer-url = "http://127.0.0.1:22380" }
+}
+`,
+			wantErr: "at least 3 entries",
 		},
 		{
 			name: "4 members",
-			input: `{
-				"etcd": {
-					"version": "3.6.16",
-					"member": {
-						"m0": {"client-url": "http://127.0.0.1:12379", "peer-url": "http://127.0.0.1:12380"},
-						"m1": {"client-url": "http://127.0.0.1:22379", "peer-url": "http://127.0.0.1:22380"},
-						"m2": {"client-url": "http://127.0.0.1:32379", "peer-url": "http://127.0.0.1:32380"},
-						"m3": {"client-url": "http://127.0.0.1:42379", "peer-url": "http://127.0.0.1:42380"}
-					}
-				}
-			}`,
-			wantErr: "expected 3 etcd members, got 4",
+			input: `@lkal "0.1"
+etcd {
+  version = "3.6.16"
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { client-url = "http://127.0.0.1:22379", peer-url = "http://127.0.0.1:22380" }
+  member "m2" { client-url = "http://127.0.0.1:32379", peer-url = "http://127.0.0.1:32380" }
+  member "m3" { client-url = "http://127.0.0.1:42379", peer-url = "http://127.0.0.1:42380" }
+}
+`,
+			wantErr: "at most 3 entries",
 		},
 		{
 			name: "missing client-url",
-			input: `{
-				"etcd": {
-					"version": "3.6.16",
-					"member": {
-						"m0": {"client-url": "http://127.0.0.1:12379", "peer-url": "http://127.0.0.1:12380"},
-						"m1": {"peer-url": "http://127.0.0.1:22380"},
-						"m2": {"client-url": "http://127.0.0.1:32379", "peer-url": "http://127.0.0.1:32380"}
-					}
-				}
-			}`,
+			input: `@lkal "0.1"
+etcd {
+  version = "3.6.16"
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { peer-url = "http://127.0.0.1:22380" }
+  member "m2" { client-url = "http://127.0.0.1:32379", peer-url = "http://127.0.0.1:32380" }
+}
+`,
 			wantErr: "client-url",
 		},
 		{
 			name: "missing peer-url",
-			input: `{
-				"etcd": {
-					"version": "3.6.16",
-					"member": {
-						"m0": {"client-url": "http://127.0.0.1:12379", "peer-url": "http://127.0.0.1:12380"},
-						"m1": {"client-url": "http://127.0.0.1:22379", "peer-url": "http://127.0.0.1:22380"},
-						"m2": {"client-url": "http://127.0.0.1:32379"}
-					}
-				}
-			}`,
+			input: `@lkal "0.1"
+etcd {
+  version = "3.6.16"
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { client-url = "http://127.0.0.1:22379", peer-url = "http://127.0.0.1:22380" }
+  member "m2" { client-url = "http://127.0.0.1:32379" }
+}
+`,
 			wantErr: "peer-url",
 		},
 		{
-			name:    "missing etcd block",
-			input:   `{}`,
-			wantErr: "missing etcd declaration",
+			name: "duplicate client-url across members",
+			input: `@lkal "0.1"
+etcd {
+  version = "3.6.16"
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:22380" }
+  member "m2" { client-url = "http://127.0.0.1:32379", peer-url = "http://127.0.0.1:32380" }
+}
+`,
+			wantErr: "L509",
 		},
 		{
-			name:    "invalid json",
-			input:   `{`,
-			wantErr: "decode etcd declaration",
+			name: "unknown field rejected by closed schema",
+			input: `@lkal "0.1"
+etcd {
+  version = "3.6.16"
+  extra = true
+  member "m0" { client-url = "http://127.0.0.1:12379", peer-url = "http://127.0.0.1:12380" }
+  member "m1" { client-url = "http://127.0.0.1:22379", peer-url = "http://127.0.0.1:22380" }
+  member "m2" { client-url = "http://127.0.0.1:32379", peer-url = "http://127.0.0.1:32380" }
+}
+`,
+			wantErr: "L503",
+		},
+		{
+			name:    "missing etcd block",
+			input:   "@lkal \"0.1\"\n",
+			wantErr: "etcd",
+		},
+		{
+			name:    "invalid lkal",
+			input:   "{",
+			wantErr: "parse",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := decodeClusterConfig([]byte(tc.input))
+			got, err := decodeClusterConfig("dev.lkal", []byte(tc.input))
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
@@ -324,11 +351,11 @@ func TestMemberURLsMustBeLoopbackIPLiterals(t *testing.T) {
 			if field == "client-url" {
 				client, peer = u, "http://127.0.0.1:12380"
 			}
-			_, err := decodeClusterConfig([]byte(fmt.Sprintf(`{"etcd": {"version": "3.6.16", "member": {
-				"m0": {"client-url": %q, "peer-url": %q},
-				"m1": {"client-url": "http://127.0.0.1:22379", "peer-url": "http://127.0.0.1:22380"},
-				"m2": {"client-url": "http://127.0.0.1:32379", "peer-url": "http://127.0.0.1:32380"}
-			}}}`, client, peer)))
+			src := fmt.Sprintf("@lkal \"0.1\"\netcd {\n  version = \"3.6.16\"\n  member \"m0\" { client-url = %s, peer-url = %s }\n  member \"m1\" { client-url = \"http://127.0.0.1:22379\", peer-url = \"http://127.0.0.1:22380\" }\n  member \"m2\" { client-url = \"http://127.0.0.1:42379\", peer-url = \"http://127.0.0.1:42380\" }\n}\n",
+				lkal.FormatValue(lkal.String(client)),
+				lkal.FormatValue(lkal.String(peer)),
+			)
+			_, err := decodeClusterConfig("dev.lkal", []byte(src))
 			return err
 		}
 		for _, u := range accept {
@@ -356,7 +383,7 @@ func TestMemberNames(t *testing.T) {
 	accept := []string{"m0", "etcd-1", "node_2", "A"}
 	reject := []string{"m=0", "m1,x", "a b", "", ".", "..", "a/b", `a\b`, "mé", "m\n0", "m0\n", " m0"}
 	for _, name := range accept {
-		if _, err := decodeClusterConfig(memberNamesJSON(name)); err != nil {
+		if _, err := decodeClusterConfig("dev.lkal", memberNamesLKAL(name)); err != nil {
 			t.Errorf("name %q: unexpected error: %v", name, err)
 		}
 	}
@@ -364,37 +391,25 @@ func TestMemberNames(t *testing.T) {
 		err := decodeNames(name)
 		if err == nil {
 			t.Errorf("name %q: accepted", name)
-		} else if !strings.Contains(err.Error(), "invalid etcd member name") {
-			t.Errorf("name %q: error %q does not report an invalid name", name, err)
+		} else if !strings.Contains(err.Error(), "L510") {
+			t.Errorf("name %q: error %q does not report L510 invalid map key", name, err)
 		}
 	}
 }
 
-func memberNamesJSON(first string) []byte {
-	return []byte(fmt.Sprintf(`{"etcd": {"version": "3.6.16", "member": {
-		%q: {"client-url": "http://127.0.0.1:12379", "peer-url": "http://127.0.0.1:12380"},
-		"m1": {"client-url": "http://127.0.0.1:22379", "peer-url": "http://127.0.0.1:22380"},
-		"m2": {"client-url": "http://127.0.0.1:32379", "peer-url": "http://127.0.0.1:32380"}
-	}}}`, first))
+func memberNamesLKAL(first string) []byte {
+	return []byte(fmt.Sprintf("@lkal \"0.1\"\netcd {\n  version = \"3.6.16\"\n  member %s { client-url = \"http://127.0.0.1:12379\", peer-url = \"http://127.0.0.1:12380\" }\n  member \"m1\" { client-url = \"http://127.0.0.1:22379\", peer-url = \"http://127.0.0.1:22380\" }\n  member \"m2\" { client-url = \"http://127.0.0.1:32379\", peer-url = \"http://127.0.0.1:32380\" }\n}\n",
+		strconv.Quote(first),
+	))
 }
 
 func decodeNames(name string) error {
-	_, err := decodeClusterConfig(memberNamesJSON(name))
+	_, err := decodeClusterConfig("dev.lkal", memberNamesLKAL(name))
 	return err
 }
 
 func TestDevDeclarationDecodes(t *testing.T) {
-	if _, err := exec.LookPath("lkal"); err != nil {
-		if os.Getenv("NAYUTAR_REQUIRE_LKAL") != "" {
-			t.Fatalf("lkal is required by NAYUTAR_REQUIRE_LKAL but is not installed: %v", err)
-		}
-		t.Skip("lkal is not installed")
-	}
-	raw, err := readLKALJSON(filepath.Join("..", "..", defaultConfigPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := decodeClusterConfig(raw)
+	cfg, err := readClusterConfig(filepath.Join("..", "..", defaultConfigPath))
 	if err != nil {
 		t.Fatal(err)
 	}

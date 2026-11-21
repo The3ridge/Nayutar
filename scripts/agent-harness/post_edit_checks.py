@@ -47,7 +47,26 @@ def _combine_output(res: subprocess.CompletedProcess[str]) -> str:
 def _check_lkal_file(target: Path, raw_path: str) -> str | None:
     if not target.is_file():
         return None
-    for subcmd in (["lkal", "fmt", "-w", str(target)], ["lkal", "check", str(target)]):
+    commands: list[list[str]] = [
+        ["lkal", "fmt", "-w", str(target)],
+        ["lkal", "check", str(target)],
+    ]
+    lower_name = target.name.lower()
+    if lower_name.endswith(".schema.lkal"):
+        commands.append(["lkal", "schema", "check", str(target)])
+        stem = target.name[: -len(".schema.lkal")]
+        if stem:
+            paired_doc = target.with_name(f"{stem}.lkal")
+            if paired_doc.is_file():
+                commands.append(["lkal", "check", "--schema", str(target), str(paired_doc)])
+    else:
+        stem = target.name[: -len(".lkal")]
+        if stem:
+            paired_schema = target.with_name(f"{stem}.schema.lkal")
+            if paired_schema.is_file():
+                commands.append(["lkal", "check", "--schema", str(paired_schema), str(target)])
+
+    for subcmd in commands:
         try:
             res = subprocess.run(subcmd, capture_output=True, text=True, check=False)
         except FileNotFoundError:

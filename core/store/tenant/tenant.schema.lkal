@@ -1,0 +1,14 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:sys/tenant/0.1"
+version = "0.1.0"
+doc = "Schema for tenant registration records under /sys/tenants/<tenant>."
+
+root {
+  field "state" {
+    type = .enum
+    required = true
+    values = [.active, .terminating]
+  }
+}

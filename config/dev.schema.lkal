@@ -1,0 +1,47 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:config/dev/0.1"
+version = "0.1.0"
+doc = "Schema for the local development environment declaration (config/dev.lkal)."
+
+def "etcd-member" {
+  doc = "Network endpoints of a single local etcd cluster member."
+  type = .record
+  field "client-url" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "peer-url" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+}
+
+root {
+  field "etcd" {
+    doc = "Single 3-member etcd cluster that holds every tenant's data."
+    type = .record
+    required = true
+    field "version" {
+      type = .string
+      required = true
+      min-length = 1
+      pattern = "\\S+"
+    }
+    field "member" {
+      type = .map
+      required = true
+      min-entries = 3
+      max-entries = 3
+      unique-by = ["client-url", "peer-url"]
+      key {
+        min-length = 1
+        pattern = "[A-Za-z0-9_-]+"
+      }
+      value { use = &def/etcd-member }
+    }
+  }
+}

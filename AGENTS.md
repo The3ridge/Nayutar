@@ -19,6 +19,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
   - ノードの死活監視：ADR 0008 → ADR 0024
   - リソースの封筒：ADR 0009 → ADR 0025
   - 参照の検査と逆参照索引：ADR 0010 → ADR 0026（`Binding` の identityHash つきの解決とコントローラの読み取りの制限は、Export と `Binding` の ADR に残してある）
+  - LKAL v0.2 スキーマによる宣言・内部記録・リソース kind・参照規則の検査と既定値補完：ADR 0027（`/x/<identityHash>/schema/<version>` への保存は Export と `Binding` の ADR に残してある）
 - 所有権のモデル本体、Export と `Binding`、ESR の証明、Kubernetes との差分試験は後続 ADR の範囲であり、まだ実装していない。
 - コードを書き始める前に、その決定を ADR として起票する。
 
@@ -72,16 +73,16 @@ ADR は `docs/ADR/` にあり、[DocDag](https://github.com/Kaikei-e/DocDag) で
 
 ## LKAL
 
-- 書いたら `lkal check FILE` と `lkal fmt -w FILE` を通す。CI は追跡中の全 `.lkal` に `lkal check` と `lkal fmt -l` をかける。
+- 書いたら `lkal check FILE` と `lkal fmt -w FILE` を通す。`.schema.lkal` は `lkal schema check` も通し、対になる `<stem>.schema.lkal` と `<stem>.lkal` は `lkal check --schema` で照合する。CI は追跡中の全ファイルにこれらをかける。
 - 値の読み書きは `lkal get -r FILE PATH` / `lkal set FILE PATH VALUE`（`/` 区切りのパス）。LKAL の構文を自前でパースしない。JSON が要るときは `lkal json -plain FILE`。
-- Go で任意の LKAL の値を扱うときは、LKAL の Go モジュール（`github.com/Kaikei-e/LKAL`。タグが無いので擬似バージョン）の `FromJSON`・`ToJSON`・`Equal`・`Set` を使い、汎用の LKAL-JSON の読み書きを Nayutar に書かない。
+- Go で LKAL の値とスキーマを扱うときは、LKAL の Go モジュール（`github.com/Kaikei-e/LKAL` と `github.com/Kaikei-e/LKAL/schema`）の `Parse`・`FromJSON`・`ToJSON`・`Equal`・`Set`・`schema.Compile`・`Validate`・`Complete` を使い、汎用の LKAL-JSON の読み書きや手書き構造体による代替スキーマを Nayutar に書かない。
 - 仕様と設計原則はローカル clone の `../LKAL/docs/PRINCIPLE.md` と `../LKAL/docs/ADR/` を読む。LKAL への変更が要ると判断したら、Nayutar 側で回避策を作らず、LKAL 側の変更として提案する。
 
 ## 検証コマンド
 
 ```sh
 docdag validate && docdag lint --strict
-lkal check config/*.lkal && lkal fmt -l config/*.lkal
+lkal check config/*.lkal && lkal fmt -l config/*.lkal && lkal schema check config/dev.schema.lkal && lkal check --schema config/dev.schema.lkal config/dev.lkal
 kisage plan config/dev.lkal -detailed-exitcode   # 0: NoOp, 2: 差分あり, 1: エラー / ブロック。シェルに KISAGE_HOST_CONFIG が要る（ユーザーが設定する）
 test -z "$(gofmt -l .)" && go vet ./...
 go test ./...

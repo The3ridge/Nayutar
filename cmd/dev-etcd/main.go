@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/Kaikei-e/LKAL"
+	"github.com/Kaikei-e/Nayutar/config"
 )
 
 const (
@@ -49,11 +50,7 @@ func main() {
 }
 
 func run(configPath, dataDir string) error {
-	rawJSON, err := readLKALJSON(configPath)
-	if err != nil {
-		return err
-	}
-	cfg, err := decodeClusterConfig(rawJSON)
+	cfg, err := readClusterConfig(configPath)
 	if err != nil {
 		return err
 	}
@@ -74,94 +71,73 @@ func run(configPath, dataDir string) error {
 	return runCluster(etcdBin, resolvedDataDir, cfg)
 }
 
-func readLKALJSON(configPath string) ([]byte, error) {
-	cmd := exec.Command("lkal", "json", "-plain", configPath)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return nil, fmt.Errorf("lkal json -plain %s: %w: %s", configPath, err, msg)
-		}
-		return nil, fmt.Errorf("lkal json -plain %s: %w", configPath, err)
+func readClusterConfig(configPath string) (clusterConfig, error) {
+	src, err := os.ReadFile(configPath)
+	if err != nil {
+		return clusterConfig{}, err
 	}
-	return stdout.Bytes(), nil
+	return decodeClusterConfig(configPath, src)
 }
 
-func decodeClusterConfig(data []byte) (clusterConfig, error) {
-	var raw struct {
-		Etcd *struct {
-			Version string `json:"version"`
-			Member  map[string]struct {
-				ClientURL string `json:"client-url"`
-				PeerURL   string `json:"peer-url"`
-			} `json:"member"`
-		} `json:"etcd"`
+func decodeClusterConfig(name string, src []byte) (clusterConfig, error) {
+	f, err := lkal.Parse(name, src)
+	if err != nil {
+		return clusterConfig{}, fmt.Errorf("parse %s: %w", name, err)
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return clusterConfig{}, fmt.Errorf("decode etcd declaration: %w", err)
-	}
-	if raw.Etcd == nil {
-		return clusterConfig{}, errors.New("missing etcd declaration")
-	}
-	if strings.TrimSpace(raw.Etcd.Version) == "" {
-		return clusterConfig{}, errors.New("etcd.version must not be empty")
-	}
-	if len(raw.Etcd.Member) != expectedMembers {
-		return clusterConfig{}, fmt.Errorf("expected %d etcd members, got %d", expectedMembers, len(raw.Etcd.Member))
+	if err := config.DevSchema().Validate(f); err != nil {
+		return clusterConfig{}, fmt.Errorf("validate %s: %w", name, err)
 	}
 
-	names := make([]string, 0, len(raw.Etcd.Member))
-	for name := range raw.Etcd.Member {
-		names = append(names, name)
-	}
-	slices.Sort(names)
+	etcdRec, _ := recordField(f.Data(), "etcd")
+	version, _ := stringField(etcdRec, "version")
+	memberRec, _ := recordField(etcdRec, "member")
 
-	members := make([]memberConfig, 0, len(names))
-	for _, name := range names {
-		if !validMemberName(name) {
-			return clusterConfig{}, fmt.Errorf("invalid etcd member name %q", name)
+	members := make([]memberConfig, 0, len(memberRec.Fields))
+	for _, mf := range memberRec.Fields {
+		mName := mf.Key
+		mRec := mf.Value.(lkal.Record)
+		clientURL, _ := stringField(mRec, "client-url")
+		peerURL, _ := stringField(mRec, "peer-url")
+		if err := validateLoopbackURL(clientURL); err != nil {
+			return clusterConfig{}, fmt.Errorf("etcd member %q: client-url %q: %w", mName, clientURL, err)
 		}
-		m := raw.Etcd.Member[name]
-		if strings.TrimSpace(m.ClientURL) == "" {
-			return clusterConfig{}, fmt.Errorf("etcd member %q: missing client-url", name)
-		}
-		if strings.TrimSpace(m.PeerURL) == "" {
-			return clusterConfig{}, fmt.Errorf("etcd member %q: missing peer-url", name)
-		}
-		if err := validateLoopbackURL(m.ClientURL); err != nil {
-			return clusterConfig{}, fmt.Errorf("etcd member %q: client-url %q: %w", name, m.ClientURL, err)
-		}
-		if err := validateLoopbackURL(m.PeerURL); err != nil {
-			return clusterConfig{}, fmt.Errorf("etcd member %q: peer-url %q: %w", name, m.PeerURL, err)
+		if err := validateLoopbackURL(peerURL); err != nil {
+			return clusterConfig{}, fmt.Errorf("etcd member %q: peer-url %q: %w", mName, peerURL, err)
 		}
 		members = append(members, memberConfig{
-			Name:      name,
-			ClientURL: m.ClientURL,
-			PeerURL:   m.PeerURL,
+			Name:      mName,
+			ClientURL: clientURL,
+			PeerURL:   peerURL,
 		})
 	}
+	slices.SortFunc(members, func(a, b memberConfig) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 
 	return clusterConfig{
-		Version: raw.Etcd.Version,
+		Version: version,
 		Members: members,
 	}, nil
 }
 
-// Names end up in --initial-cluster name=url,name=url and in a data directory, so only a conservative alphabet is allowed.
-func validMemberName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-		default:
-			return false
+func recordField(rec lkal.Record, key string) (lkal.Record, bool) {
+	for _, f := range rec.Fields {
+		if f.Key == key {
+			r, ok := f.Value.(lkal.Record)
+			return r, ok
 		}
 	}
-	return true
+	return lkal.Record{}, false
+}
+
+func stringField(rec lkal.Record, key string) (string, bool) {
+	for _, f := range rec.Fields {
+		if f.Key == key {
+			s, ok := f.Value.(lkal.String)
+			return string(s), ok
+		}
+	}
+	return "", false
 }
 
 // The development cluster is plaintext and unauthenticated, so members may only listen on loopback IP literals.

@@ -119,8 +119,10 @@ func TestLkalJobDecodesTheDevelopmentDeclaration(t *testing.T) {
 		t.Fatal("ci.yml has no lkal job")
 	}
 	for _, needle := range []string{
+		"go install github.com/Kaikei-e/LKAL/cmd/lkal@v0.2.0",
+		"lkal schema check",
+		"lkal check --schema",
 		"name: Decode the development etcd declaration",
-		`NAYUTAR_REQUIRE_LKAL: "1"`,
 		"set -euo pipefail",
 	} {
 		if !strings.Contains(job, needle) {

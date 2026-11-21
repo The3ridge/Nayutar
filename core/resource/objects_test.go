@@ -61,11 +61,37 @@ func (c *fixedClock) Set(t time.Time) {
 	c.t = t
 }
 
+var defaultTestSchemas = func() resource.Schemas {
+	workload, err := resource.CompileKindSchema("workload.schema.lkal", []byte(`@lkal "0.1"
+lkal-schema = "0.2"
+
+root {
+  field "spec" {
+    type = .record
+    field "replicas" { type = .int }
+    field "ratio" { type = .decimal }
+    field "mem" { type = .quantity }
+  }
+  field "status" {
+    type = .record
+    field "phase" { type = .string }
+    field "ratio" { type = .decimal }
+    field "mem" { type = .quantity }
+  }
+}
+`))
+	if err != nil {
+		panic(err)
+	}
+	return resource.Schemas{"workload": workload}
+}()
+
 func testObjectsConfig() (resource.Config, *fixedClock) {
 	clk := &fixedClock{t: time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)}
 	return resource.Config{
-		Now:  clk.Now,
-		Rand: &seqRand{},
+		Now:     clk.Now,
+		Rand:    &seqRand{},
+		Schemas: defaultTestSchemas,
 	}, clk
 }
 
@@ -491,8 +517,9 @@ func TestObjectsRawBytesUIDsAndRandFailure(t *testing.T) {
 
 	fixedBytes := bytes.Repeat([]byte{0xab}, 16)
 	objs := resource.NewObjects(st, resource.Config{
-		Now:  func() time.Time { return time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC) },
-		Rand: bytes.NewReader(append(slices.Clone(fixedBytes), fixedBytes...)),
+		Now:     func() time.Time { return time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC) },
+		Rand:    bytes.NewReader(append(slices.Clone(fixedBytes), fixedBytes...)),
+		Schemas: defaultTestSchemas,
 	})
 
 	// Two objects with identical fixed-byte streams still yield valid v4 UUIDs,
@@ -551,7 +578,7 @@ func TestObjectsRawBytesUIDsAndRandFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	failObjs := resource.NewObjects(st, resource.Config{Rand: failRand{err: wantErr}})
+	failObjs := resource.NewObjects(st, resource.Config{Rand: failRand{err: wantErr}, Schemas: defaultTestSchemas})
 	if _, err := failObjs.Create(ctx, refs.Principal{}, workloadCand("never", 1)); !errors.Is(err, wantErr) {
 		t.Fatalf("Create with failing Rand = %v, want %v", err, wantErr)
 	}
@@ -560,7 +587,7 @@ func TestObjectsRawBytesUIDsAndRandFailure(t *testing.T) {
 	}
 
 	// Short Rand (EOF) also fails without writing.
-	shortObjs := resource.NewObjects(st, resource.Config{Rand: io.LimitReader(bytes.NewReader(fixedBytes), 8)})
+	shortObjs := resource.NewObjects(st, resource.Config{Rand: io.LimitReader(bytes.NewReader(fixedBytes), 8), Schemas: defaultTestSchemas})
 	if _, err := shortObjs.Create(ctx, refs.Principal{}, workloadCand("short", 1)); err == nil {
 		t.Fatal("Create with short Rand succeeded, want error")
 	}

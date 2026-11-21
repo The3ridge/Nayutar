@@ -2,13 +2,28 @@ package tenant
 
 import (
 	"context"
-	"encoding/json/v2"
+	_ "embed"
 	"errors"
 	"fmt"
 
+	"github.com/Kaikei-e/LKAL"
+	"github.com/Kaikei-e/LKAL/schema"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 )
+
+//go:embed tenant.schema.lkal
+var tenantSchemaBytes []byte
+
+var tenantSchema *schema.Schema
+
+func init() {
+	s, err := schema.Compile("tenant.schema.lkal", tenantSchemaBytes)
+	if err != nil {
+		panic("tenant: embedded tenant.schema.lkal failed to compile: " + err.Error())
+	}
+	tenantSchema = s
+}
 
 // State represents the lifecycle state of a tenant registration.
 type State uint8
@@ -43,7 +58,6 @@ var (
 const (
 	activeJSON      = `{"$lkal":"0.1","state":{"$enum":"active"}}`
 	terminatingJSON = `{"$lkal":"0.1","state":{"$enum":"terminating"}}`
-	lkalVersion     = "0.1"
 	listPage        = 64
 	drainPage       = 64
 )
@@ -65,30 +79,27 @@ func tenantKey(name string) (string, error) {
 	return keyspace.Key{Family: keyspace.FamilyTenant, Tenant: name}.Encode()
 }
 
-type recordDoc struct {
-	Lkal  *string   `json:"$lkal"`
-	State *stateDoc `json:"state"`
-}
-
-type stateDoc struct {
-	Enum *string `json:"$enum"`
-}
-
 func decodeRecordValue(key string, data []byte) (State, error) {
-	var doc recordDoc
-	if err := json.Unmarshal(data, &doc, json.RejectUnknownMembers(true)); err != nil {
+	f, err := lkal.FromJSON(data)
+	if err != nil {
 		return 0, fmt.Errorf("%w: key %s: %v", ErrCorruptRecord, key, err)
 	}
-	if doc.Lkal == nil || *doc.Lkal != lkalVersion || doc.State == nil || doc.State.Enum == nil {
-		return 0, fmt.Errorf("%w: key %s: unexpected schema or fields", ErrCorruptRecord, key)
+	if err := tenantSchema.Validate(f); err != nil {
+		return 0, fmt.Errorf("%w: key %s: %v", ErrCorruptRecord, key, err)
 	}
-	switch *doc.State.Enum {
+	var state string
+	for _, fld := range f.Data().Fields {
+		if fld.Key == "state" {
+			state = string(fld.Value.(lkal.Enum))
+		}
+	}
+	switch state {
 	case "active":
 		return StateActive, nil
 	case "terminating":
 		return StateTerminating, nil
 	default:
-		return 0, fmt.Errorf("%w: key %s: unknown state %q", ErrCorruptRecord, key, *doc.State.Enum)
+		return 0, fmt.Errorf("%w: key %s: unknown state %q", ErrCorruptRecord, key, state)
 	}
 }
 

@@ -78,7 +78,7 @@ depends-on: ["0004", "0006", "0009", "0022"]
 - **リビジョンは値に保存しない**（ https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/apiserver/pkg/storage/api_object_versioner.go 、2026-11-21 確認）：`PrepareObjectForStorage` は「clears resourceVersion and selfLink prior to writing to etcd」であり、読み出し時に etcd の `ModRevision` から入れ直す（ https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go ）。同じファイルは、符号化した結果が保存済みのバイト列と等しければ書き込みを省く（`if !origState.Stale && bytes.Equal(data, origState.Data)`）。
 - **条件の文法と遷移時刻**（2026-11-21 確認）：`metav1.Condition`（ https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go ）は、`status` を `True;False;Unknown`、`reason` を `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`・1024 文字以内とする。`SetStatusCondition`（ https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/apimachinery/pkg/api/meta/conditions.go ）は、`existingCondition.Status != newCondition.Status` のときだけ `LastTransitionTime` を変える。API conventions は「Condition types should be named in PascalCase.」と書き、条件の集まりを「treated as a map with a key of `type`」とする。Kubernetes は `type` に `foo.example.com/` の接頭辞も許すが、本 ADR は許さない（`/` が LKAL のパスの区切りだからである）。
 - **UID の版**（ https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/apiserver/pkg/registry/rest/meta.go 、2026-11-21 確認）：Kubernetes は作成時に `uuid.NewUUID()` を呼ぶ。これは第 4 版である（ https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/apimachinery/pkg/util/uuid/uuid.go 。委譲したワーカーによる取得）。RFC 9562（ https://www.rfc-editor.org/rfc/rfc9562 、2026-11-21 確認）は、時刻順でない第 4 版が「poor database-index locality」を持つと書く。UID は索引のキーにしないので、時計を要らず作成時刻も漏らさない第 4 版を採る。
-- **LKAL の公開 API だけで読み書きできる**（`../LKAL` の `json.go`・`path.go`・`value.go`、2026-11-21 確認）：`FromJSON` は 9 型の木を返し、`$` で始まるキー（`L205`）と重複したキー（`L201`）を拒否する。`Set` は Record の値を受け取り、`ToJSON(f, false)` が先頭に `$lkal` を置く。`Equal` はレコードの欄の順序を無視する。LKAL にはまだタグが無いので、擬似バージョン `v0.0.0-20261114132324-790bdd412dd7` に依存する。
+- **LKAL の公開 API だけで読み書きできる**（`../LKAL` の `json.go`・`path.go`・`value.go`、2026-11-21 確認）：`FromJSON` は 9 型の木を返し、`$` で始まるキー（`L205`）と重複したキー（`L201`）を拒否する。`Set` は Record の値を受け取り、`ToJSON(f, false)` が先頭に `$lkal` を置く。`Equal` はレコードの欄の順序を無視する。LKAL の `v0.2.0` リリースに伴い、依存をリリースタグ `v0.2.0` に更新した（[[0027]]）。
 - **手元での確認**（2026-11-21）：`lake build` で Lean モデルと 10 定理の証明（`sorry` なし）が通ること、`nayutar-drt envelope` が [[0009]] の例を受け付け、`kind = "Workload"` と `group = "core"` を形の誤りとして拒否することを確かめた。
 
 ## 検討した代替案
@@ -110,7 +110,6 @@ depends-on: ["0004", "0006", "0009", "0022"]
   - Kubernetes の `kind: Deployment` は、取り込みのたびに小文字の kind へ変換が要る。変換表は取り込みを決める ADR が持つ。
   - 条件型の接頭辞（`foo.example.com/Ready`）と `message` 欄は表せない。
   - 利用者は、`status` を `Update` で一切変えられない。
-  - Nayutar は LKAL の Go モジュールに、タグの無い擬似バージョンで依存する。
 - **引き受けるリスク**：
   - 入口は文書全体を置き換える。前提（`meta/revision`）を付けない書き込みは、あいだに入った他の書き込みの結果を上書きしうる。複数の書き手が別々の条件を書くときは、前提を付けるか、[[0012]] の Patch と [[0013]] の所有権が入るまで読み直してやり直す。
   - 前提を付けない書き込みも、読んでから書くまでに他の書き込みが入れば競合で返る。再試行は呼び出し側が行う。
@@ -136,3 +135,4 @@ depends-on: ["0004", "0006", "0009", "0022"]
 - [[0015]]：時計と乱数を外から渡す規則を定める提案。
 - [[0020]]：素のテナントビューを定める。
 - [[0022]]：キーの文法とコーデック、登録簿のビューを定める。`meta/kind`・`meta/name`・`meta/group` の文法はこれを使う。
+- [[0027]]：封筒の共通 LKAL v0.2 スキーマ（`envelope.schema.lkal`）および `core/resource` における種別ごとのスキーマ検証と `default` 補完を定める。

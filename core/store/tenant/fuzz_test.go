@@ -69,7 +69,7 @@ func FuzzRegistryRecordDecode(f *testing.F) {
 		[]byte(`{"$lkal":"0.1","state":{"$enum":"active"},"extra":1}`),
 		[]byte(`null`),
 		[]byte(``),
-		[]byte{0xff, 0xfe, 0xfd},
+		{0xff, 0xfe, 0xfd},
 	} {
 		f.Add(seed)
 	}

@@ -31,13 +31,13 @@ const (
 	deleteBackRefBatch = 64
 )
 
-// Config configures clock, randomness, tenant identity, reference schema, and authorization for an Objects handle.
+// Config configures clock, randomness, tenant identity, per-kind LKAL v0.2 schemas, and authorization for an Objects handle.
 // Rand is read from every goroutine that calls Create and must be safe for concurrent use (crypto/rand.Reader is).
 type Config struct {
 	Now        func() time.Time // defaults to time.Now
 	Rand       io.Reader        // defaults to crypto/rand.Reader
 	Tenant     string
-	References refs.Schema
+	Schemas    Schemas
 	Authorizer refs.Authorizer
 }
 
@@ -47,6 +47,7 @@ type Objects struct {
 	now        func() time.Time
 	rand       io.Reader
 	tenant     string
+	schemas    Schemas
 	references refs.Schema
 	schemaErr  error
 	authorizer refs.Authorizer
@@ -62,15 +63,40 @@ func NewObjects(st tenant.Store, cfg Config) *Objects {
 	if randReader == nil {
 		randReader = rand.Reader
 	}
+	clonedSchemas := maps.Clone(cfg.Schemas)
+	derivedRefs, schemaErr := validateSchemasMap(clonedSchemas)
 	return &Objects{
 		st:         st,
 		now:        nowFn,
 		rand:       randReader,
 		tenant:     cfg.Tenant,
-		references: cfg.References,
-		schemaErr:  cfg.References.Validate(),
+		schemas:    clonedSchemas,
+		references: derivedRefs,
+		schemaErr:  schemaErr,
 		authorizer: cfg.Authorizer,
 	}
+}
+
+func (o *Objects) lookupKindSchema(obj keyspace.Object) (*KindSchema, error) {
+	if o.schemaErr != nil {
+		return nil, &refs.Error{
+			Kind:   refs.ErrInternal,
+			Detail: o.schemaErr.Error(),
+		}
+	}
+	qkind, err := keyspace.QualifiedKind(obj.Group, obj.Kind)
+	if err != nil {
+		return nil, &envelope.Error{Kind: envelope.ErrMalformed, Path: "meta/kind", Detail: err.Error()}
+	}
+	ks := o.schemas[qkind]
+	if ks == nil {
+		return nil, &envelope.Error{
+			Kind:   envelope.ErrMalformed,
+			Path:   "meta/kind",
+			Detail: fmt.Sprintf("unknown resource kind %q", qkind),
+		}
+	}
+	return ks, nil
 }
 
 func objectKey(obj keyspace.Object) (string, error) {
@@ -352,7 +378,8 @@ func buildWriteTxn(
 	return cmps, ops, nil
 }
 
-// Create validates candidate, checks references, assigns a version-4 UUID and generation 1, and stores it if absent.
+// Create completes declared spec defaults, validates candidate against the kind's LKAL v0.2 schema,
+// checks references, assigns a version-4 UUID and generation 1, and stores it if absent.
 func (o *Objects) Create(ctx context.Context, principal refs.Principal, candidate lkal.Record) (lkal.Record, error) {
 	obj, err := envelope.Object(candidate)
 	if err != nil {
@@ -366,12 +393,23 @@ func (o *Objects) Create(ctx context.Context, principal refs.Principal, candidat
 	if err != nil {
 		return lkal.Record{}, err
 	}
+	ks, err := o.lookupKindSchema(obj)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	completed, err := ks.completeCandidate(canonical)
+	if err != nil {
+		return lkal.Record{}, err
+	}
 	uid, err := newUUIDv4(o.rand)
 	if err != nil {
 		return lkal.Record{}, err
 	}
-	doc, err := envelope.Create(canonical, uid)
+	doc, err := envelope.Create(completed, uid)
 	if err != nil {
+		return lkal.Record{}, err
+	}
+	if err := ks.validateSpec(doc); err != nil {
 		return lkal.Record{}, err
 	}
 	delta, infos, err := o.checkRefs(ctx, obj, principal, lkal.Record{}, false, doc)
@@ -417,23 +455,47 @@ func (o *Objects) Get(ctx context.Context, obj keyspace.Object) (lkal.Record, er
 	return envelope.WithRevision(doc, int64(modRev)), nil
 }
 
-// Update validates and applies a spec or labels change to an existing object using optimistic concurrency.
+// Update completes declared spec defaults, validates and applies a spec or labels change to an existing object using optimistic concurrency.
 func (o *Objects) Update(ctx context.Context, principal refs.Principal, candidate lkal.Record) (lkal.Record, error) {
-	return o.applyUpdate(ctx, principal, candidate, envelope.Update)
+	return o.applyUpdate(
+		ctx,
+		principal,
+		candidate,
+		func(ks *KindSchema, canonical lkal.Record) (lkal.Record, error) {
+			return ks.completeCandidate(canonical)
+		},
+		envelope.Update,
+		func(ks *KindSchema, next lkal.Record) error {
+			return ks.validateSpec(next)
+		},
+	)
 }
 
 // UpdateStatus validates and applies a status change to an existing object using optimistic concurrency.
 func (o *Objects) UpdateStatus(ctx context.Context, candidate lkal.Record) (lkal.Record, error) {
-	return o.applyUpdate(ctx, refs.Principal{}, candidate, func(old lkal.Record, modRev int64, canonical lkal.Record) (lkal.Record, error) {
-		return envelope.UpdateStatus(old, modRev, canonical, envelope.Timestamp(o.now()))
-	})
+	return o.applyUpdate(
+		ctx,
+		refs.Principal{},
+		candidate,
+		func(_ *KindSchema, canonical lkal.Record) (lkal.Record, error) {
+			return canonical, nil
+		},
+		func(old lkal.Record, modRev int64, canonical lkal.Record) (lkal.Record, error) {
+			return envelope.UpdateStatus(old, modRev, canonical, envelope.Timestamp(o.now()))
+		},
+		func(ks *KindSchema, next lkal.Record) error {
+			return ks.validateStatus(next)
+		},
+	)
 }
 
 func (o *Objects) applyUpdate(
 	ctx context.Context,
 	principal refs.Principal,
 	candidate lkal.Record,
-	transition func(old lkal.Record, modRev int64, canonical lkal.Record) (lkal.Record, error),
+	prepareCandidate func(ks *KindSchema, canonical lkal.Record) (lkal.Record, error),
+	transition func(old lkal.Record, modRev int64, prepared lkal.Record) (lkal.Record, error),
+	validateNext func(ks *KindSchema, next lkal.Record) error,
 ) (lkal.Record, error) {
 	obj, err := envelope.Object(candidate)
 	if err != nil {
@@ -447,12 +509,26 @@ func (o *Objects) applyUpdate(
 	if err != nil {
 		return lkal.Record{}, err
 	}
+	ks, err := o.lookupKindSchema(obj)
+	if err != nil {
+		return lkal.Record{}, err
+	}
 	old, modRev, err := o.readStored(ctx, obj, key)
 	if err != nil {
 		return lkal.Record{}, err
 	}
-	next, err := transition(old, int64(modRev), canonical)
+	if _, err := refs.DeleteDelta(old); err != nil {
+		return lkal.Record{}, err
+	}
+	prepared, err := prepareCandidate(ks, canonical)
 	if err != nil {
+		return lkal.Record{}, err
+	}
+	next, err := transition(old, int64(modRev), prepared)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	if err := validateNext(ks, next); err != nil {
 		return lkal.Record{}, err
 	}
 	delta, infos, err := o.checkRefs(ctx, obj, principal, old, true, next)

@@ -12,24 +12,22 @@ const nameAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345
 
 func FuzzDecodeClusterConfig(f *testing.F) {
 	for _, seed := range []string{
-		`{"etcd":{"version":"3.6.16","member":{"m0":{"client-url":"http://127.0.0.1:12379","peer-url":"http://127.0.0.1:12380"},"m1":{"client-url":"http://127.0.0.1:22379","peer-url":"http://127.0.0.1:22380"},"m2":{"client-url":"http://[::1]:32379","peer-url":"http://127.0.0.1:32380/"}}}}`,
-		`{"etcd":{"version":"3.6.16","member":{"m2":{"client-url":"http://127.0.0.1:1","peer-url":"http://127.0.0.1:2"},"m1":{"client-url":"http://127.0.0.1:3","peer-url":"http://127.0.0.1:4"},"m0":{"client-url":"http://127.0.0.1:5","peer-url":"http://127.0.0.1:6"}}}}`,
-		`{"etcd":{"version":"3.6.16","member":{"m0":{"client-url":"http://0.0.0.0:1","peer-url":"http://127.0.0.1:2"},"m1":{},"m2":{}}}}`,
-		`{"etcd":{"version":"","member":{}}}`,
-		`{"etcd":{"version":"3.6.16","member":{"..":{"client-url":"http://127.0.0.1:1","peer-url":"http://127.0.0.1:2"},"a/b":{"client-url":"http://127.0.0.1:3","peer-url":"http://127.0.0.1:4"},"\\":{"client-url":"http://127.0.0.1:5","peer-url":"http://127.0.0.1:6"}}}}`,
-		`{"etcd":null}`,
-		`{"etcd":[]}`,
-		`{}`,
-		`[`,
-		``,
-		`{"etcd":{"version":"3.6.16","member":{"m0":{"client-url":"http://[0:0:0:0:0:0:0:1]:1","peer-url":"http://[0::1]:2"},"m1":{"client-url":"http://[::ffff:127.0.0.1]:3","peer-url":"http://[::ffff:7f00:1]:4"},"m2":{"client-url":"HTTP://127.0.0.1:5","peer-url":"http://127.0.0.1:6"}}}}`,
-		`{"etcd":{"version":"3.6.16","member":{"m=0":{"client-url":"http://127.0.0.1:1","peer-url":"http://127.0.0.1:2"},"m1,x":{"client-url":"http://127.0.0.1:3","peer-url":"http://127.0.0.1:4"},"a b":{"client-url":"http://127.0.0.1:5","peer-url":"http://127.0.0.1:6"}}}}`,
-		`{"etcd":{"version":"3.6.16","member":{"m0":{"client-url":"https://127.0.0.1:1","peer-url":"http://127.0.0.1:2"},"m1":{},"m2":{}}}}`,
+		"@lkal \"0.1\"\netcd {\n  version = \"3.6.16\"\n  member \"m0\" { client-url = \"http://127.0.0.1:12379\", peer-url = \"http://127.0.0.1:12380\" }\n  member \"m1\" { client-url = \"http://127.0.0.1:22379\", peer-url = \"http://127.0.0.1:22380\" }\n  member \"m2\" { client-url = \"http://[::1]:32379\", peer-url = \"http://127.0.0.1:32380/\" }\n}\n",
+		"@lkal \"0.1\"\netcd {\n  version = \"3.6.16\"\n  member \"m2\" { client-url = \"http://127.0.0.1:1\", peer-url = \"http://127.0.0.1:2\" }\n  member \"m1\" { client-url = \"http://127.0.0.1:3\", peer-url = \"http://127.0.0.1:4\" }\n  member \"m0\" { client-url = \"http://127.0.0.1:5\", peer-url = \"http://127.0.0.1:6\" }\n}\n",
+		"@lkal \"0.1\"\netcd {\n  version = \"3.6.16\"\n  member \"m0\" { client-url = \"http://0.0.0.0:1\", peer-url = \"http://127.0.0.1:2\" }\n  member \"m1\" {}\n  member \"m2\" {}\n}\n",
+		"@lkal \"0.1\"\netcd { version = \"\", member {} }\n",
+		"@lkal \"0.1\"\netcd {\n  version = \"3.6.16\"\n  member \"..\" { client-url = \"http://127.0.0.1:1\", peer-url = \"http://127.0.0.1:2\" }\n  member \"a/b\" { client-url = \"http://127.0.0.1:3\", peer-url = \"http://127.0.0.1:4\" }\n  member \"\\\\\" { client-url = \"http://127.0.0.1:5\", peer-url = \"http://127.0.0.1:6\" }\n}\n",
+		"@lkal \"0.1\"\n",
+		"[",
+		"",
+		"@lkal \"0.1\"\netcd {\n  version = \"3.6.16\"\n  member \"m0\" { client-url = \"http://[0:0:0:0:0:0:0:1]:1\", peer-url = \"http://[0::1]:2\" }\n  member \"m1\" { client-url = \"http://[::ffff:127.0.0.1]:3\", peer-url = \"http://[::ffff:7f00:1]:4\" }\n  member \"m2\" { client-url = \"HTTP://127.0.0.1:5\", peer-url = \"http://127.0.0.1:6\" }\n}\n",
+		"@lkal \"0.1\"\netcd {\n  version = \"3.6.16\"\n  member \"m=0\" { client-url = \"http://127.0.0.1:1\", peer-url = \"http://127.0.0.1:2\" }\n  member \"m1,x\" { client-url = \"http://127.0.0.1:3\", peer-url = \"http://127.0.0.1:4\" }\n  member \"a b\" { client-url = \"http://127.0.0.1:5\", peer-url = \"http://127.0.0.1:6\" }\n}\n",
+		"@lkal \"0.1\"\netcd {\n  version = \"3.6.16\"\n  member \"m0\" { client-url = \"https://127.0.0.1:1\", peer-url = \"http://127.0.0.1:2\" }\n  member \"m1\" { client-url = \"http://127.0.0.1:3\", peer-url = \"http://127.0.0.1:4\" }\n  member \"m2\" { client-url = \"http://127.0.0.1:5\", peer-url = \"http://127.0.0.1:6\" }\n}\n",
 	} {
 		f.Add([]byte(seed))
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		cfg, err := decodeClusterConfig(data)
+		cfg, err := decodeClusterConfig("fuzz.lkal", data)
 		if err != nil {
 			return
 		}

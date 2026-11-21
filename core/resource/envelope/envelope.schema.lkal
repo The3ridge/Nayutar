@@ -1,0 +1,96 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:core/envelope/0.1"
+version = "0.1.0"
+doc = "Common resource envelope schema (meta, spec, status)."
+
+def "condition" {
+  type = .record
+  field "state" {
+    type = .enum
+    required = true
+    values = [.true, .false, .unknown]
+  }
+  field "reason" {
+    type = .string
+    required = true
+    min-length = 1
+    max-length = 1024
+    pattern = "[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?"
+  }
+  field "since" {
+    type = .string
+    pattern = "[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z"
+  }
+}
+
+def "meta" {
+  type = .record
+  field "group" {
+    type = .string
+    min-length = 3
+    max-length = 253
+    pattern = "[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+"
+  }
+  field "kind" {
+    type = .string
+    required = true
+    min-length = 1
+    max-length = 63
+    pattern = "[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+  }
+  field "name" {
+    type = .string
+    required = true
+    min-length = 1
+    max-length = 253
+    pattern = "[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*"
+  }
+  field "labels" {
+    type = .map
+    value { type = .string }
+  }
+  field "uid" {
+    type = .string
+    pattern = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+  }
+  field "revision" {
+    type = .int
+    min = 1
+  }
+  field "generation" {
+    type = .int
+    min = 1
+  }
+}
+
+def "status" {
+  type = .record
+  open = true
+  field "observedGeneration" {
+    type = .int
+    min = 1
+  }
+  field "condition" {
+    type = .map
+    key {
+      min-length = 1
+      max-length = 63
+      pattern = "[A-Z][A-Za-z0-9]*"
+    }
+    value { use = &def/condition }
+  }
+}
+
+root {
+  field "meta" {
+    required = true
+    use = &def/meta
+  }
+  field "spec" {
+    type = .record
+    open = true
+  }
+  field "status" { use = &def/status }
+}

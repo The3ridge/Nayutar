@@ -3,7 +3,7 @@ module github.com/Kaikei-e/Nayutar
 go 1.27.3
 
 require (
-	github.com/Kaikei-e/LKAL v0.0.0-20261114132324-790bdd412dd7
+	github.com/Kaikei-e/LKAL v0.2.0
 	github.com/anishathalye/porcupine v1.3.1
 	github.com/cedar-policy/cedar-go v1.9.3
 	go.etcd.io/etcd/api/v3 v3.7.3
