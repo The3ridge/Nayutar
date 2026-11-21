@@ -2,223 +2,350 @@
 
 **English** | [日本語](README.ja.md)
 
-**Nayutar** is a container orchestrator designed from the ground up to be a **full-scale alternative to Kubernetes** — built by a solo developer together with AI coding agents on machine-checkable formal specifications and differential oracles.
-
-Human-written declarations use [LKAL](https://github.com/Kaikei-e/LKAL), while field-level collaboration builds on [kisage](https://github.com/Kaikei-e/kisage)'s leaf-path ownership model. For container execution, networking, and storage, Nayutar builds on established OCI, containerd, CNI, and CSI interfaces. Every architectural decision is recorded in [`docs/ADR/`](docs/ADR/) as a verifiable DAG managed by [DocDag](https://github.com/Kaikei-e/DocDag).
+Nayutar is a container orchestrator that aims to be a **full alternative to Kubernetes**. It is at an early stage: the foundation is built and verified, and the parts that run containers are not built yet.
 
 > [!IMPORTANT]
-> **Project Status — Early / Pre-Release (Verification Gate G0 in progress)**
+> **You cannot deploy workloads with Nayutar yet.** There is no API server, no CLI, no node agent and no scheduler.
 >
-> Nayutar is not yet usable as an end-to-end orchestrator, and the [G0 verification gate](docs/ADR/0018-define-the-g0-verification-gate-pass-criteria.md) is not yet complete. What exists today is a verified foundation of Go libraries and Lean 4 specifications — covering the consensus store contract, etcd v3.6 adapter with fault injection, tenant keyspace and fenced registry, per-tenant watch cache, soft-state node liveness, resource envelope, and write-time reference checking — backed by **34 protected Lean theorems** (`sorry`-free) and **7 Lean–Go differential random test (DRT) suites** that you can run locally today.
+> Today Nayutar is a set of Go libraries: a store, tenant isolation, a watch cache, node failure detection and a resource model. You can call them from Go and run the checks that verify them. This README shows how.
 
----
+## Contents
 
-## Why Nayutar?
+- [Get started](#get-started)
+- [Words you will meet](#words-you-will-meet)
+- [What exists and what does not](#what-exists-and-what-does-not)
+- [How Nayutar is verified](#how-nayutar-is-verified)
+- [Roadmap](#roadmap)
+- [Repository layout](#repository-layout)
+- [Learn more](#learn-more)
+- [Prior art](#prior-art)
 
-Nayutar targets multi-tenant, multi-thousand-node orchestration rather than scoping down to single-node or small-cluster use cases, designing configuration, field ownership, tenant isolation, and control-plane scaling around explicit invariants ([ADR 0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)).
+## Get started
 
-### 1. Typed Declarations in LKAL, with YAML Import Support
+Steps 1 and 2 need only Go 1.27.3 or newer. Steps 3 and 4 are optional and need one more tool each.
 
-Human-facing manifests and configuration are written in [LKAL](https://github.com/Kaikei-e/LKAL) (`.lkal`), where value types are determined directly by syntax and unset fields are represented by path absence rather than `null`. Quantities (`512Mi`), enums (`.tcp`), and typed references (`&secret/db-creds/spec/password`) are first-class values inside a uniform three-record envelope (`meta`, `spec`, `status`) ([ADR 0009](docs/ADR/0009-fix-the-resource-envelope-to-meta-spec-and-status.md), [ADR 0025](docs/ADR/0025-realize-the-resource-envelope-with-a-lowercase-kind-two-write-entrances-a-pure-transition-core-and-an-object-store-binding.md)):
+### 1. Get the code and run the tests
 
-```lkal
-@lkal "0.1"
+```sh
+git clone https://github.com/Kaikei-e/Nayutar.git
+cd Nayutar
+go test ./...
+```
 
-meta {
-  kind = "workload"
-  name = "web"
-  labels { app = "web" }
-}
+Every package should end with `ok`. This step needs no etcd and no Lean.
 
-spec {
-  replicas = 3
-  container "app" {
-    image = "ghcr.io/acme/web:1.5.0"
-    port "http" { number = 8080, protocol = .tcp }
-    memory = 512Mi
-    env "DB_PASSWORD" { from = &secret/db-creds/spec/password }
+### 2. Store your first objects
+
+This program registers a tenant, declares two kinds of resource, and stores one object of each. It uses the in-memory store, so nothing needs to be running.
+
+Save it as `tour/main.go` inside the clone:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	lkal "github.com/Kaikei-e/LKAL"
+	"github.com/Kaikei-e/Nayutar/core/resource"
+	"github.com/Kaikei-e/Nayutar/core/resource/refs"
+	"github.com/Kaikei-e/Nayutar/core/store/memstore"
+	"github.com/Kaikei-e/Nayutar/core/store/tenant"
+)
+
+// A schema says what a kind of resource may contain.
+const workloadSchema = `@lkal "0.1"
+lkal-schema = "0.2"
+
+root {
+  field "spec" {
+    type = .record
+    field "replicas" { type = .int, min = 0, default = 2 }
+    field "image" { type = .string, required = true }
+    field "creds" { type = .ref, targets = [&secret] }
   }
 }
+`
+
+const secretSchema = `@lkal "0.1"
+lkal-schema = "0.2"
+
+root {
+  field "spec" {
+    type = .record
+    field "data" { type = .string }
+  }
+}
+`
+
+// A declaration is what a person writes.
+const secret = `@lkal "0.1"
+
+meta { kind = "secret", name = "db-creds" }
+spec { data = "s3cr3t" }
+`
+
+const workload = `@lkal "0.1"
+
+meta { kind = "workload", name = "web" }
+spec {
+  image = "ghcr.io/acme/web:1.5.0"
+  creds = &secret/%s
+}
+`
+
+type allowAll struct{}
+
+func (allowAll) Authorize(refs.Request) bool { return true }
+
+func main() {
+	ctx := context.Background()
+
+	registry := tenant.NewRegistry(memstore.New())
+	must(registry.Register(ctx, "acme"))
+	view, err := registry.View(ctx, "acme")
+	must(err)
+
+	objects := resource.NewObjects(view, resource.Config{
+		Tenant: "acme",
+		Schemas: resource.Schemas{
+			"workload": kind("workload.schema.lkal", workloadSchema),
+			"secret":   kind("secret.schema.lkal", secretSchema),
+		},
+		Authorizer: allowAll{},
+	})
+	alice := refs.Principal{Type: "User", ID: "alice"}
+
+	// A reference to an object that does not exist is rejected.
+	_, err = objects.Create(ctx, alice, parse(fmt.Sprintf(workload, "missing")))
+	fmt.Println("dangling reference:", err)
+
+	_, err = objects.Create(ctx, alice, parse(secret))
+	must(err)
+	created, err := objects.Create(ctx, alice, parse(fmt.Sprintf(workload, "db-creds")))
+	must(err)
+
+	out, err := resource.Encode(created)
+	must(err)
+	fmt.Printf("created: %s\n", out)
+}
+
+func kind(name, src string) *resource.KindSchema {
+	ks, err := resource.CompileKindSchema(name, []byte(src))
+	must(err)
+	return ks
+}
+
+func parse(src string) lkal.Record {
+	f, err := lkal.Parse("input.lkal", []byte(src))
+	must(err)
+	return f.Data()
+}
+
+func must(err error) {
+	if err != nil {
+		log.Fatal(err)
+	}
+}
 ```
 
-- **Explicit intent vs. status separation**: Writes enter through two distinct entrances (`Update` for `labels`/`spec` and `UpdateStatus` for `status`). Out-of-scope or server-managed fields (`uid`, `generation`, `revision`, condition `since`) are rejected unless omitted or unchanged, making unintended edits immediately visible.
-- **Interop via YAML import**: Existing YAML workloads (such as Helm charts, KRM manifests, and Compose files) are planned to be supported through an import layer rather than as the native authoring format. Nayutar scopes Kubernetes compatibility to this workload-import boundary rather than targeting full API server compatibility or CNCF Kubernetes conformance.
+Run it:
 
-### 2. Tenant-First Isolation & Write-Time Reference Safety
-
-Nayutar separates the isolation boundary from naming hierarchies by placing the tenant at the root of the store keyspace (`/t/<tenant>/`) and expressing naming structure within dot-delimited object names ([ADR 0006](docs/ADR/0006-put-the-tenant-at-the-top-of-the-key-space-and-keep-namespaces-out-of-keys.md), [ADR 0022](docs/ADR/0022-realize-the-key-space-with-a-strict-segment-grammar-a-key-codec-and-a-fenced-tenant-registry.md)):
-
-- **Single-prefix tenant mobility & fencing**: Every object, ownership record, back-reference index entry, and API binding for a tenant lives under `/t/<tenant>/`, enabling clean prefix isolation, fenced two-phase tenant deletion, and future per-tenant store sharding.
-- **Fail-closed reference validation at write time**: References (`Ref`) are tenant-relative and appear only under `spec`. On create or update, newly added `(sourcePath, ref)` pairs are checked against a reference schema table, authorized via [Cedar](https://docs.cedarpolicy.com/) (`Nayutar::Action::"Reference"`), and verified against target `mod_revision` in the **same atomic transaction** that updates the back-reference index — preventing cross-scope reference escalation through controller permissions at write time ([ADR 0010](docs/ADR/0010-check-references-at-write-time-and-keep-them-inside-a-tenant.md), [ADR 0026](docs/ADR/0026-realize-reference-checking-with-a-pure-check-core-a-reference-schema-table-cedar-authorization-and-a-back-reference-index-in-the-object-transaction.md)).
-
-### 3. Explicit Leaf-Path Ownership *(Planned — [ADR 0013](docs/ADR/0013-store-leaf-path-ownership-under-its-own-key-and-update-it-in-the-same-transaction.md))*
-
-Multi-actor collaboration builds on [kisage](https://github.com/Kaikei-e/kisage)'s leaf-path ownership model:
-
-- Ownership metadata is stored under a dedicated key (`/t/<tenant>/own/...`) and updated in the same compare-and-swap (`Txn`) as the object body, keeping ownership tracking out of regular object reads and watch payloads.
-- Ownership conflicts, structural collisions, and external drift stop fail-closed with structured diagnostics and are resolved through explicit ownership handoff (`adopt` / `release`) rather than a force-overwrite flag; updates (`apply`) are also separated from conservative deletion (`prune`).
-
-### 4. Soft-State Liveness & Per-Tenant Watch Caching
-
-- **Consensus writes proportional to transitions, not heartbeats**: The internal store contract omits Leases and TTL keys ([ADR 0004](docs/ADR/0004-fix-a-subset-of-the-etcd-v3-api-without-leases-as-the-store-contract.md)). Node heartbeats are held in memory on liveness aggregators using an exact integer φ accrual failure detector, rendezvous-hashed assignment, indirect peer/witness probing, and local-health self-suspicion. Only confirmed state transitions (`Ready` / `NotReady`) and globally rate-limited eviction permits are written to the store via CAS ([ADR 0008](docs/ADR/0008-keep-node-liveness-as-soft-state-and-write-only-confirmed-transitions-to-the-store.md), [ADR 0024](docs/ADR/0024-realize-node-liveness-with-an-exact-phi-test-a-deterministic-detector-core-a-node-registry-and-a-rate-limited-eviction-permit.md)).
-- **Per-(tenant, kind) watch cache**: Reads, exact-revision snapshots, periodic bookmarks, and streaming `watch list` initial syncs are served from memory backed by a persistent path-copying B-tree and closed-revision tracking, isolating watch retention across tenants so high write volume in one tenant does not evict watch history for others ([ADR 0007](docs/ADR/0007-serve-watches-from-a-per-tenant-cache-with-revisions-bookmarks-and-watch-list.md), [ADR 0023](docs/ADR/0023-realize-the-watch-cache-as-a-library-with-a-persistent-b-tree-closed-revisions-and-an-in-process-compaction-bound.md)).
-
-### 5. Standard Data Planes with Direct Runtime Integration
-
-Nayutar starts on a 3-member etcd v3.6 cluster behind a swappable `Store` contract ([ADR 0005](docs/ADR/0005-start-on-a-single-etcd-cluster-with-tenant-key-prefixes.md)) and plans to integrate directly with containerd 2.3 LTS via its Go client alongside standard CNI plugins, CSI gRPC services, and default-deny `nftables` chains — building on established Linux and cloud-native data planes in a form tailored to Nayutar's workload model ([ADR 0014](docs/ADR/0014-drive-containerd-directly-without-cri.md), [ADR 0016](docs/ADR/0016-enforce-default-deny-network-policy-with-nftables-first.md)).
-
-### 6. Machine-Checkable Assurance for Solo + AI Development
-
-Making a full-scale orchestrator tractable for one person and AI coding agents relies on machine-checkable oracles whose specifications remain under human control ([ADR 0002](docs/ADR/0002-implement-the-core-in-go-and-write-specifications-in-lean-4.md), [ADR 0003](docs/ADR/0003-assure-the-implementation-by-differential-testing-against-lean-models-instead-of-proving-it.md), [ADR 0017](docs/ADR/0017-build-the-drt-harness-and-the-theorem-statement-guard-first-and-defer-the-models-the-esr-proof-and-the-kubernetes-oracle.md), [ADR 0021](docs/ADR/0021-guard-the-trust-root-of-the-theorem-statements-on-the-server-and-run-the-lean-and-drt-workflows-on-every-change.md)):
-
-1. **Executable Lean 4 Models & Protected Proofs**: Pure state-machine cores are modeled in `spec/`. Agents may write proofs under `spec/Nayutar/Proofs/`, while theorem statements under `spec/Nayutar/Statements/` and `spec/comparator.json` are owned by the maintainer and verified inside a `bwrap` sandbox via [`lake comparator`](https://github.com/leanprover/comparator).
-2. **Differential Random Testing (DRT)**: Seeded Go generators stream thousands of multi-step operation traces over NDJSON to `nayutar-drt` and compare every step's output field-for-field, backed by mutation tests that verify broken implementations are caught.
-3. **Linearizability & Fault Injection**: Store backends and watch caches are checked with [Porcupine](https://github.com/anishathalye/porcupine) across leader kills, majority loss, and silent peer-proxy network partitions on real 3-member etcd v3.6 clusters ([ADR 0020](docs/ADR/0020-realize-the-single-etcd-cluster-and-inject-majority-loss-and-network-partitions-into-its-tests.md)).
-4. **Deterministic Simulation & External Oracles**: Liveness runs across 19 multi-fault scenarios on a seeded event queue (`livesim`), with system-wide simulation interfaces ([ADR 0015](docs/ADR/0015-route-all-external-effects-through-simulation-interfaces-and-pick-the-simulator-after-evaluating-gosim.md)) and differential testing against Kubernetes v1.37 (`kind` / `kwok`) scheduled for upcoming milestones.
-
----
-
-## Architecture Overview
-
-### Keyspace Layout
-
-All persistent keys conform to a strict lowercase ASCII codec ([`core/store/keyspace`](core/store/keyspace)) with a single canonical byte representation:
+```sh
+go run ./tour
+```
 
 ```text
-/t/<tenant>/o/<group>/<kind>/<name>               Object envelope (LKAL-JSON)
-/t/<tenant>/own/<group>/<kind>/<name>             Leaf-path ownership (planned, ADR 0013)
-/t/<tenant>/ref/<tQKind>/<tName>/<sQKind>/<sName> Back-reference index
-/t/<tenant>/bind/<identityHash>                   Exported API binding (planned)
-/x/<identityHash>/schema/<version>                Exported API schema (planned)
-/sys/tenants/<tenant>                             Tenant lifecycle & mod_revision fence
-/sys/nodes/<node>                                 Node registration, state & eviction permit
-/sys/liveness/evictions                           Cluster-wide rolling eviction budget
+dangling reference: refs: notFound: spec/creds &secret/missing: target object not found
+created: {"$lkal":"0.1","meta":{"kind":"workload","name":"web","uid":"bad176a3-5652-4b0b-92a2-fe9ad3e8b27c","generation":1,"revision":4},"spec":{"image":"ghcr.io/acme/web:1.5.0","creds":{"$ref":"secret/db-creds"},"replicas":2}}
 ```
 
-### Verification-Gated Progression
+The `uid` differs on every run. Three things happened that the declaration did not ask for:
 
-Development is organized around explicit **verification gates (G0–G4)** with measurable pass criteria rather than treating intermediate milestones as standalone releases ([ADR 0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)):
+- **The broken reference was refused.** The first workload pointed at a secret that did not exist, so the write failed and nothing was stored.
+- **The default was filled in.** The declaration has no `replicas`. The schema says the default is 2, and the stored object has `replicas: 2`.
+- **The server set its own fields.** `uid`, `generation` and `revision` come from the store. A write that tries to set them is rejected.
 
-- **G0 (Specifications & Harnesses — current focus, [ADR 0018](docs/ADR/0018-define-the-g0-verification-gate-pass-criteria.md))**: Store/watch and CAS ownership Lean models + DRT, watch invariant proofs, abstract-state-machine ESR proofs, deterministic simulator evaluation, and automated differential tests against Kubernetes v1.37.
-- **G1–G4 (Scale, Multi-Tenancy & Ecosystem)**: 10,000-node control-plane latency and 72-hour liveness fault injection (G1), 50,000-node / 1,000-tenant store sharding and `nftables` vs. `cilium/ebpf` benchmarks (G2), and higher-level workload/controller gates.
+The example allows every reference. [`core/resource/refcedar`](core/resource/refcedar) provides an authorizer that decides with [Cedar](https://docs.cedarpolicy.com/) policies.
 
----
+Delete the `tour` directory when you are done. The API is not stable and will change.
 
-## Current Status
+### 3. Run the same program on etcd (optional)
 
-### Implemented & Verified Today
+The store is a contract, and etcd is one implementation of it. This step needs etcd v3.6.16.
 
-| Area | Go Packages | Lean 4 Spec & Proofs | Verification Today |
-| --- | --- | --- | --- |
-| **DRT & Theorem Guard** ([ADR 0017](docs/ADR/0017-build-the-drt-harness-and-the-theorem-statement-guard-first-and-defer-the-models-the-esr-proof-and-the-kubernetes-oracle.md), [0021](docs/ADR/0021-guard-the-trust-root-of-the-theorem-statements-on-the-server-and-run-the-lean-and-drt-workflows-on-every-change.md)) | [`core/drt`](core/drt), [`cmd/check-protected-theorems`](cmd/check-protected-theorems) | `Fixture/Register.lean` (3 theorems) | NDJSON DRT runner, payload/implementation mutation checks, sandboxed `lake comparator` |
-| **Store Contract & Backends** ([ADR 0004](docs/ADR/0004-fix-a-subset-of-the-etcd-v3-api-without-leases-as-the-store-contract.md), [0005](docs/ADR/0005-start-on-a-single-etcd-cluster-with-tenant-key-prefixes.md), [0020](docs/ADR/0020-realize-the-single-etcd-cluster-and-inject-majority-loss-and-network-partitions-into-its-tests.md)) | [`core/store`](core/store), `memstore`, `etcdstore`, `storetest` | `Store.lean` | Contract suite, Porcupine linearizability, 3-member etcd member kills, majority loss & peer-proxy network partitions, DRT (`store`) |
-| **Keyspace & Tenant Registry** ([ADR 0006](docs/ADR/0006-put-the-tenant-at-the-top-of-the-key-space-and-keep-namespaces-out-of-keys.md), [0022](docs/ADR/0022-realize-the-key-space-with-a-strict-segment-grammar-a-key-codec-and-a-fenced-tenant-registry.md)) | [`core/store/keyspace`](core/store/keyspace), [`core/store/tenant`](core/store/tenant) | `Keyspace.lean` | Fuzzing, property tests, `mod_revision`-fenced views, resumable 2-phase tenant deletion on `memstore` & etcd, DRT (`keyspace`) |
-| **Watch Cache** ([ADR 0007](docs/ADR/0007-serve-watches-from-a-per-tenant-cache-with-revisions-bookmarks-and-watch-list.md), [0023](docs/ADR/0023-realize-the-watch-cache-as-a-library-with-a-persistent-b-tree-closed-revisions-and-an-in-process-compaction-bound.md)) | [`core/store/watchcache`](core/store/watchcache) (`btree`, `window`) | `WatchCache.lean` (4 theorems) | No-loss, no-duplicates, order-preservation, and bookmark-monotonicity proofs; linearizability across etcd leader failure; DRT (`watchcache`) |
-| **Node Liveness** ([ADR 0008](docs/ADR/0008-keep-node-liveness-as-soft-state-and-write-only-confirmed-transitions-to-the-store.md), [0024](docs/ADR/0024-realize-node-liveness-with-an-exact-phi-test-a-deterministic-detector-core-a-node-registry-and-a-rate-limited-eviction-permit.md)) | [`core/liveness`](core/liveness) (`phi`, `hrw`, `detector`, `budget`, `livesim`) | `Liveness.lean` (9 theorems) | Safety proofs, DRT (`liveness`), 19 seeded fault-injection scenarios in `livesim`, `testing/synctest` runtime tests, etcd registry tests |
-| **Resource Envelope & Schemas** ([ADR 0009](docs/ADR/0009-fix-the-resource-envelope-to-meta-spec-and-status.md), [0025](docs/ADR/0025-realize-the-resource-envelope-with-a-lowercase-kind-two-write-entrances-a-pure-transition-core-and-an-object-store-binding.md), [0027](docs/ADR/0027-apply-lkal-v0-2-schemas-to-declarations-system-records-resource-kinds-and-reference-rules.md)) | [`core/resource/envelope`](core/resource/envelope), [`core/resource`](core/resource) | `Envelope.lean` (10 theorems) | Envelope transition & generation/revision proofs, LKAL v0.2 kind schemas & `spec` default completion, LKAL-JSON store binding on `memstore` & etcd, DRT (`envelope`) |
-| **Reference Checking** ([ADR 0010](docs/ADR/0010-check-references-at-write-time-and-keep-them-inside-a-tenant.md), [0026](docs/ADR/0026-realize-reference-checking-with-a-pure-check-core-a-reference-schema-table-cedar-authorization-and-a-back-reference-index-in-the-object-transaction.md), [0027](docs/ADR/0027-apply-lkal-v0-2-schemas-to-declarations-system-records-resource-kinds-and-reference-rules.md)) | [`core/resource/refs`](core/resource/refs), `refcedar`, [`core/resource`](core/resource) | `Refs.lean` (8 theorems) | Write-time reference & index-delta proofs, `.ref` `targets` rule derivation, `cedar-go` authorization, atomic CAS back-reference index tests on `memstore` & etcd, DRT (`refs`) |
-| **Local Dev etcd Launcher** ([ADR 0020](docs/ADR/0020-realize-the-single-etcd-cluster-and-inject-majority-loss-and-network-partitions-into-its-tests.md), [0027](docs/ADR/0027-apply-lkal-v0-2-schemas-to-declarations-system-records-resource-kinds-and-reference-rules.md)) | [`cmd/dev-etcd`](cmd/dev-etcd), [`config/dev.lkal`](config/dev.lkal), [`config/dev.schema.lkal`](config/dev.schema.lkal) | — | Validates `config/dev.lkal` against `config/dev.schema.lkal` in Go and launches a local 3-member etcd v3.6.16 cluster |
-
-### Not Implemented Yet
-
-- **HTTP/2 API server (`lk api`)**, client authentication, path-based Patch (`test`/`set`/`del`), and deterministic LKAL-CBOR wire encoding ([ADR 0012](docs/ADR/0012-use-lkal-json-on-the-wire-first-and-add-untagged-deterministic-cbor-later.md)).
-- **CAS leaf-path ownership & apply/prune** ([ADR 0013](docs/ADR/0013-store-leaf-path-ownership-under-its-own-key-and-update-it-in-the-same-transaction.md)).
-- **API Export / `Binding`** (`identityHash`-qualified resolution and controller read-scope enforcement), controller SDK, and **Eventually Stable Reconciliation (ESR)** proofs.
-- **Node agent (`lk-node`)**, direct containerd/CNI/CSI execution ([ADR 0014](docs/ADR/0014-drive-containerd-directly-without-cri.md)), default-deny `nftables` policy enforcement ([ADR 0016](docs/ADR/0016-enforce-default-deny-network-policy-with-nftables-first.md)), liveness gRPC transport (`lk live`), and scheduler.
-- **System-wide deterministic simulator selection** ([ADR 0015](docs/ADR/0015-route-all-external-effects-through-simulation-interfaces-and-pick-the-simulator-after-evaluating-gosim.md)) and **Kubernetes v1.37 differential test harness** (`kind` / `kwok`).
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- **Required**: **Go 1.27.3** or newer (runs all default unit tests, linearizability checks, fuzz targets, and `livesim` with zero external dependencies).
-- **Optional (Formal Specs & DRT)**: **Lean 4.35.0** via [`elan`](https://github.com/leanprover/elan), plus `bwrap` ([bubblewrap](https://github.com/containers/bubblewrap) with unprivileged user namespaces enabled) for `lake comparator`.
-- **Optional (etcd Integration & Fault Injection)**: **etcd v3.6.16** (`etcd` in `PATH` or pointed to by `NAYUTAR_ETCD_BIN`).
-- **Optional (Declarations & ADRs)**: [`lkal`](https://github.com/Kaikei-e/LKAL) and [`docdag`](https://github.com/Kaikei-e/DocDag).
-
-### 1. Run Core Tests & Simulations (Go Only)
+Download etcd and point Nayutar at it (Linux x86-64 shown):
 
 ```sh
-go build ./...
-go test ./...
-go test -race ./...
+curl -fsSL https://github.com/etcd-io/etcd/releases/download/v3.6.16/etcd-v3.6.16-linux-amd64.tar.gz | tar xz
+export NAYUTAR_ETCD_BIN="$PWD/etcd-v3.6.16-linux-amd64/etcd"
 ```
 
-To run the seeded node-liveness fault-injection simulator with more seeds (default is 30 seeds across 19 scenarios):
+Start a local 3-member cluster and leave it running. Its members are declared in [`config/dev.lkal`](config/dev.lkal).
 
 ```sh
-NAYUTAR_SIM_SEEDS=100 go test ./core/liveness/livesim/
+go run ./cmd/dev-etcd -data-dir "$(mktemp -d)"
 ```
 
-### 2. Build Lean 4 Proofs & Run Differential Random Tests
+In `tour/main.go`, replace the `memstore` import with these two:
+
+```go
+	"github.com/Kaikei-e/Nayutar/core/store/etcdstore"
+	clientv3 "go.etcd.io/etcd/client/v3"
+```
+
+and replace the line that creates the registry with:
+
+```go
+	client, err := clientv3.New(clientv3.Config{Endpoints: []string{"http://127.0.0.1:12379"}})
+	must(err)
+	defer client.Close()
+	registry := tenant.NewRegistry(etcdstore.New(client))
+```
+
+Run `go run ./tour` in another terminal. The output is the same, and the keys are now in etcd:
 
 ```sh
-# Build all Lean models and sorry-free proofs
+etcd-v3.6.16-linux-amd64/etcdctl --endpoints=http://127.0.0.1:12379 get --prefix / --keys-only
+```
+
+```text
+/sys/tenants/acme
+/t/acme/o/core/secret/db-creds
+/t/acme/o/core/workload/web
+/t/acme/ref/secret/db-creds/workload/web
+```
+
+Everything the tenant owns is under `/t/acme/`. The last key is the back-reference index: it records that `web` refers to `db-creds`.
+
+With etcd available you can also run the tests that kill members and partition the network:
+
+```sh
+go test -tags etcd ./core/store/... ./core/liveness/ ./core/resource/
+```
+
+### 4. Check the specifications (optional)
+
+The behaviour you saw in step 2 is specified in Lean 4. This step needs Lean through [`elan`](https://github.com/leanprover/elan), which installs the version the repository pins.
+
+```sh
+# Build the Lean models and proofs
 (cd spec && lake build)
 
-# Verify that all 34 protected theorem statements and permitted axioms match
-go build -o "${TMPDIR:-/tmp}/check-protected-theorems" ./cmd/check-protected-theorems \
-  && "${TMPDIR:-/tmp}/check-protected-theorems"
-(cd spec && lake comparator)
-
-# Run all 7 Lean-Go differential random test suites (1,000 cases per suite by default)
+# Run random operations on both the Go code and the Lean models, and compare
 go test -tags drt ./core/drt/...
 ```
 
-### 3. Run 3-Member etcd Fault-Injection Suites
+One more check confirms that every proof proves the theorem as the maintainer stated it. It needs `bwrap` ([bubblewrap](https://github.com/containers/bubblewrap), with unprivileged user namespaces):
 
 ```sh
-# Contract tests, Porcupine linearizability, member kills, majority loss & network partitions
-go test -tags etcd ./core/store/... ./core/liveness/ ./core/resource/
-
-# Run Lean-Go differential random tests directly against a 3-member etcd cluster
-go test -tags "drt etcd" ./core/drt/...
+(cd spec && lake comparator)
 ```
 
-You can also launch a standalone 3-member local development etcd cluster declared in [`config/dev.lkal`](config/dev.lkal) (requires `etcd` 3.6.16):
+The complete list of verification commands is in [`AGENTS.md`](AGENTS.md#検証コマンド).
 
-```sh
-go run ./cmd/dev-etcd
-```
+## Words you will meet
 
----
+| Word | Meaning |
+| --- | --- |
+| **LKAL** | The language for declarations and configuration (`.lkal`). Nayutar uses it where Kubernetes uses YAML. See [LKAL](https://github.com/Kaikei-e/LKAL). |
+| **Tenant** | The unit of isolation. Every key a tenant owns is under `/t/<tenant>/`. |
+| **Kind** | A type of resource, such as `workload` or `secret`. A schema defines each kind. |
+| **Envelope** | The fixed shape of every resource: `meta` (identity), `spec` (what you want) and `status` (what was observed). |
+| **Reference** | A typed pointer from one object to another, written `&secret/db-creds`. It is checked when it is written and cannot leave its tenant. |
+| **Store contract** | The interface every backend implements: a subset of the etcd v3 API without leases. `memstore` and `etcdstore` implement it. |
+| **DRT** | Differential random testing. The same random operations run on the Go code and on the Lean model, and the results must match. |
+| **Verification gate** | A stage of the project, G0 to G4, that is passed by meeting measurable criteria. |
+| **ADR** | A decision record in [`docs/ADR/`](docs/ADR/). Every design decision is written there before the code. |
 
-## Repository Layout & ADRs
+## What exists and what does not
+
+These are Go libraries with tests. None is reachable over a network API yet.
+
+| Area | What it does | Code |
+| --- | --- | --- |
+| Store contract | A subset of the etcd v3 API without leases, with an in-memory implementation and an etcd v3.6 adapter. | [`core/store`](core/store) |
+| Tenant keyspace | Puts every key of a tenant under one prefix. A registry fences writes, so a write that arrives after its tenant is deleted is refused. | [`core/store/keyspace`](core/store/keyspace), [`core/store/tenant`](core/store/tenant) |
+| Watch cache | Serves reads, snapshots at an exact revision and watches from memory, with one cache per tenant and kind. | [`core/store/watchcache`](core/store/watchcache) |
+| Node liveness | Detects failed nodes from in-memory heartbeats and writes only confirmed state changes to the store. | [`core/liveness`](core/liveness) |
+| Resource envelope | Fixes the shape of every resource and separates writes of intent from writes of status. | [`core/resource/envelope`](core/resource/envelope) |
+| Reference checks | Checks each new reference when it is written, in the same transaction as the object. | [`core/resource/refs`](core/resource/refs) |
+| Kind schemas | Validates each kind, fills in defaults and derives the reference rules. | [`core/resource`](core/resource) |
+
+Not built yet:
+
+- **API server and CLI.** There is no way to send a declaration over the network.
+- **Field ownership**, `apply` and `prune`, for several actors editing one object.
+- **Node agent**: running containers through containerd, networking, storage, network policy.
+- **Scheduler and controllers.**
+- **YAML import** for Helm charts, Kubernetes manifests and Compose files.
+
+## How Nayutar is verified
+
+One developer builds Nayutar together with AI coding agents. One person cannot review everything the agents write, so the maintainer owns the specifications and machines check the code against them.
+
+| Check | What it does | Scope today |
+| --- | --- | --- |
+| **Lean 4 proofs** | Models of the core state machines live in [`spec/`](spec), with theorems about them. | 34 theorems |
+| **Differential random testing** | Runs random operations on the Go code and the Lean model, and compares every step. | 7 suites, 1,000 cases each by default |
+| **Linearizability and fault injection** | Checks operation histories on a real 3-member etcd cluster while members are killed, the majority is lost, or the network is partitioned. | Store, watch cache |
+| **Deterministic simulation** | Replays multi-fault scenarios on a seeded event queue. | Node liveness: 19 scenarios |
+| **Kubernetes as an oracle** | Compares behaviour with Kubernetes v1.37. | Planned |
+
+Agents may write proofs but not theorem statements. Hooks in [`scripts/agent-harness/`](scripts/agent-harness) stop an agent from editing the statements or other protected files.
+
+## Roadmap
+
+Work is organised by verification gates, not by releases.
+
+| Gate | Focus |
+| --- | --- |
+| **G0** (current) | Specifications and test harnesses. In progress, not passed yet. |
+| **G1** | One cluster at scale: 10,000 simulated nodes |
+| **G2** | Many tenants at scale: 50,000 simulated nodes and 1,000 tenants |
+| **G3–G4** | Later stages. Their criteria are not written yet. |
+
+The node counts are initial targets and may change.
+
+## Repository layout
 
 ```text
-cmd/                    CLI tools (dev-etcd launcher, protected-theorem checker)
-config/                 Local environment declarations in LKAL (config/dev.lkal)
+cmd/                    dev-etcd launcher, protected-theorem checker
+config/                 Development environment declared in LKAL
 core/
-  drt/                  Lean–Go differential random test runner and suites
-  liveness/             Soft-state node liveness, integer phi detector, budget & livesim
-  resource/             Resource envelope, write-time reference checks, Cedar & store binding
-  store/                Store contract, memstore, etcdstore, keyspace, tenant & watchcache
-docs/ADR/               Architecture Decision Records (validated by DocDag)
-scripts/agent-harness/  Guard hooks and self-checks for coding agents
-spec/                   Independent Lean 4 Lake package (models, statements, proofs, DRT exe)
+  drt/                  Differential random tests between Go and Lean
+  liveness/             Node liveness: detector, registry, simulator
+  resource/             Resource envelope, kind schemas, reference checks
+  store/                Store contract, memstore, etcdstore, keyspace, tenant, watchcache
+docs/ADR/               Decision records (in Japanese)
+scripts/agent-harness/  Guard hooks for coding agents
+spec/                   Lean 4 models, theorem statements and proofs
 ```
 
-### Architecture Decision Map
+## Learn more
 
-Design changes are proposed as ADRs before implementation. Accepted ADRs are immutable (`docdag validate --immutable-since`):
+- **Why each design was chosen**: the decision records in [`docs/ADR/`](docs/ADR/), starting with [the fixed premises](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md). They are in Japanese.
+- **Working on the code**: [`AGENTS.md`](AGENTS.md) is the map of the repository. It lists the rules for each area and every verification command. It is written for coding agents and is the best starting point for people too.
+- **Reporting a vulnerability**: [`SECURITY.md`](SECURITY.md).
 
-- **Foundations & Verification (`accepted`)**: [0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md) (Fixed premises) · [0002](docs/ADR/0002-implement-the-core-in-go-and-write-specifications-in-lean-4.md) (Go + Lean 4) · [0003](docs/ADR/0003-assure-the-implementation-by-differential-testing-against-lean-models-instead-of-proving-it.md) (DRT & oracles) · [0017](docs/ADR/0017-build-the-drt-harness-and-the-theorem-statement-guard-first-and-defer-the-models-the-esr-proof-and-the-kubernetes-oracle.md) (DRT harness & `lake comparator` guard; expanded in [0021](docs/ADR/0021-guard-the-trust-root-of-the-theorem-statements-on-the-server-and-run-the-lean-and-drt-workflows-on-every-change.md)) · [0018](docs/ADR/0018-define-the-g0-verification-gate-pass-criteria.md) (G0 pass criteria)
-- **Store, Keyspace, Watch & Liveness (`accepted` → `proposed` realizations)**: [0004](docs/ADR/0004-fix-a-subset-of-the-etcd-v3-api-without-leases-as-the-store-contract.md) (Lease-free `Store` contract) · [0005](docs/ADR/0005-start-on-a-single-etcd-cluster-with-tenant-key-prefixes.md) → [0020](docs/ADR/0020-realize-the-single-etcd-cluster-and-inject-majority-loss-and-network-partitions-into-its-tests.md) (Single 3-node etcd & fault injection) · [0006](docs/ADR/0006-put-the-tenant-at-the-top-of-the-key-space-and-keep-namespaces-out-of-keys.md) → [0022](docs/ADR/0022-realize-the-key-space-with-a-strict-segment-grammar-a-key-codec-and-a-fenced-tenant-registry.md) (Tenant-top keyspace & fenced registry) · [0007](docs/ADR/0007-serve-watches-from-a-per-tenant-cache-with-revisions-bookmarks-and-watch-list.md) → [0023](docs/ADR/0023-realize-the-watch-cache-as-a-library-with-a-persistent-b-tree-closed-revisions-and-an-in-process-compaction-bound.md) (Per-tenant watch cache) · [0008](docs/ADR/0008-keep-node-liveness-as-soft-state-and-write-only-confirmed-transitions-to-the-store.md) → [0024](docs/ADR/0024-realize-node-liveness-with-an-exact-phi-test-a-deterministic-detector-core-a-node-registry-and-a-rate-limited-eviction-permit.md) (Soft-state node liveness)
-- **Resources, Schemas & References (`accepted` → `proposed` realizations)**: [0009](docs/ADR/0009-fix-the-resource-envelope-to-meta-spec-and-status.md) → [0025](docs/ADR/0025-realize-the-resource-envelope-with-a-lowercase-kind-two-write-entrances-a-pure-transition-core-and-an-object-store-binding.md) (`meta`/`spec`/`status` envelope) · [0010](docs/ADR/0010-check-references-at-write-time-and-keep-them-inside-a-tenant.md) → [0026](docs/ADR/0026-realize-reference-checking-with-a-pure-check-core-a-reference-schema-table-cedar-authorization-and-a-back-reference-index-in-the-object-transaction.md) (Write-time reference checks & Cedar) · [0011](docs/ADR/0011-express-ordered-record-sets-with-an-explicit-integer-order-leaf.md) (Ordered record sets) · [0027](docs/ADR/0027-apply-lkal-v0-2-schemas-to-declarations-system-records-resource-kinds-and-reference-rules.md) (LKAL v0.2 schemas, `spec` default completion & reference rule derivation)
-- **Upcoming Subsystems (`proposed`)**: [0012](docs/ADR/0012-use-lkal-json-on-the-wire-first-and-add-untagged-deterministic-cbor-later.md) (LKAL-JSON / Patch / CBOR wire format) · [0013](docs/ADR/0013-store-leaf-path-ownership-under-its-own-key-and-update-it-in-the-same-transaction.md) (Transactional leaf-path ownership) · [0014](docs/ADR/0014-drive-containerd-directly-without-cri.md) (Direct containerd integration) · [0015](docs/ADR/0015-route-all-external-effects-through-simulation-interfaces-and-pick-the-simulator-after-evaluating-gosim.md) (Simulation I/O interfaces) · [0016](docs/ADR/0016-enforce-default-deny-network-policy-with-nftables-first.md) (Default-deny `nftables` network policy)
+## Prior art
 
----
+Nayutar builds on [LKAL](https://github.com/Kaikei-e/LKAL) for declarations, [kisage](https://github.com/Kaikei-e/kisage) for the ownership model, [DocDag](https://github.com/Kaikei-e/DocDag) for decision records, [etcd](https://etcd.io/), [Lean 4](https://lean-lang.org/) with [`comparator`](https://github.com/leanprover/comparator), [Cedar](https://github.com/cedar-policy/cedar-go) and [Porcupine](https://github.com/anishathalye/porcupine).
 
-## Prior Art & Credits
+Individual designs draw on the following work. The decision records cite it in detail.
 
-Nayutar builds directly on [LKAL](https://github.com/Kaikei-e/LKAL), [kisage](https://github.com/Kaikei-e/kisage), [DocDag](https://github.com/Kaikei-e/DocDag), [etcd](https://etcd.io/), [Lean 4](https://lean-lang.org/) and [`comparator`](https://github.com/leanprover/comparator), [Cedar (`cedar-go`)](https://github.com/cedar-policy/cedar-go), and [Porcupine](https://github.com/anishathalye/porcupine). Specific design mechanisms also draw on primary specifications and research cited in individual ADRs, including consistent reads from cache ([KEP-2340](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/2340-Consistent-reads-from-cache/README.md)) and streaming watch-list ([KEP-3157](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/3157-watch-list/README.md)), `APIExport`/`APIBinding` identity hashing ([kcp](https://docs.kcp.io/kcp/main/concepts/apis/exporting-apis/)), analysis of cross-namespace and cluster-scoped operator reference vulnerabilities (["Breaking the Bulkhead", NDSS 2026](https://arxiv.org/abs/2507.03387)), the φ accrual failure detector ([Hayashibara et al., SRDS 2004](https://doi.org/10.1109/RELDIS.2004.1353004) and [Apache Pekko](https://github.com/apache/pekko)), SWIM indirect probing ([Das et al., DSN 2002](https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf)), Lifeguard self-awareness ([Dadgar et al., 2017](https://arxiv.org/abs/1707.00788)), and rely-guarantee controller composition principles ([Welder](https://doi.org/10.1145/3830418.3843868), referenced for design principles with no code or toolchain dependency).
-
-## Contributing & Security
-
-- [`AGENTS.md`](AGENTS.md): Repository map, area-specific rules, verification gates, and protected-path guardrails for contributors and coding agents.
-- [`SECURITY.md`](SECURITY.md): Supported versions and private vulnerability reporting policy.
+| Design | Source |
+| --- | --- |
+| Consistent reads from the watch cache | [KEP-2340](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/2340-Consistent-reads-from-cache/README.md) |
+| Streaming watch-list | [KEP-3157](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/3157-watch-list/README.md) |
+| API export, binding and identity hashes | [kcp](https://docs.kcp.io/kcp/main/concepts/apis/exporting-apis/) |
+| Reference attacks across isolation boundaries | ["Breaking the Bulkhead", NDSS 2026](https://arxiv.org/abs/2507.03387) |
+| φ accrual failure detector | [Hayashibara et al., SRDS 2004](https://doi.org/10.1109/RELDIS.2004.1353004), [Apache Pekko](https://github.com/apache/pekko) |
+| Indirect probing | [SWIM, Das et al., DSN 2002](https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf) |
+| Local health awareness | [Lifeguard, Dadgar et al., 2017](https://arxiv.org/abs/1707.00788) |
+| Rely-guarantee composition of controllers | [Welder](https://doi.org/10.1145/3830418.3843868) (design principles only, no code or toolchain dependency) |
 
 ## License
 
