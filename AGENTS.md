@@ -20,6 +20,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
   - リソースの封筒：ADR 0009 → ADR 0025
   - 参照の検査と逆参照索引：ADR 0010 → ADR 0026（`Binding` の identityHash つきの解決とコントローラの読み取りの制限は、Export と `Binding` の ADR に残してある）
   - LKAL v0.2 スキーマによる宣言・内部記録・リソース kind・参照規則の検査と既定値補完：ADR 0027（`/x/<identityHash>/schema/<version>` への保存は Export と `Binding` の ADR に残してある）
+  - 順序付きレコード集合（`core/resource/orderedset` と `CompileKindSchema` の双方向検査）：ADR 0011 → ADR 0028
 - 所有権のモデル本体、Export と `Binding`、ESR の証明、Kubernetes との差分試験は後続 ADR の範囲であり、まだ実装していない。
 - コードを書き始める前に、その決定を ADR として起票する。
 

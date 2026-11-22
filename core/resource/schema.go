@@ -9,6 +9,7 @@ import (
 	"github.com/Kaikei-e/LKAL"
 	"github.com/Kaikei-e/LKAL/schema"
 	"github.com/Kaikei-e/Nayutar/core/resource/envelope"
+	"github.com/Kaikei-e/Nayutar/core/resource/orderedset"
 	"github.com/Kaikei-e/Nayutar/core/resource/refs"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 )
@@ -69,6 +70,9 @@ func CompileKindSchemaFile(f *lkal.File) (*KindSchema, error) {
 	rootRec, _ := findRecordField(data, "root")
 
 	if err := checkNoStructuralCycles(rootRec, defs, defOrder); err != nil {
+		return nil, err
+	}
+	if err := checkOrderedSets(rootRec, defs, defOrder); err != nil {
 		return nil, err
 	}
 	if boolFieldValue(rootRec, "open") {
@@ -359,6 +363,103 @@ func checkNoStructuralCycles(rootRec lkal.Record, defs map[string]lkal.Record, d
 		if err := walkDef(name); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func checkOrderedSets(rootRec lkal.Record, defs map[string]lkal.Record, defOrder []string) error {
+	var walkSpec func(rec lkal.Record, path string) error
+	walkSpec = func(rec lkal.Record, path string) error {
+		resolved := derefTypeSpec(rec, defs)
+		if typeAllows(resolved, "map") {
+			if err := checkOrderedSetMap(resolved, defs, path); err != nil {
+				return err
+			}
+			if valRec, ok := findRecordField(resolved, "value"); ok {
+				if err := walkSpec(valRec, path+"/*"); err != nil {
+					return err
+				}
+			}
+		}
+		if typeAllows(resolved, "record") {
+			if fieldsRec, ok := findRecordField(resolved, "field"); ok {
+				for _, fld := range fieldsRec.Fields {
+					if fRec, ok := fld.Value.(lkal.Record); ok {
+						if err := walkSpec(fRec, path+"/"+fld.Key); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+		if typeAllows(resolved, "list") {
+			if itemsRec, ok := findRecordField(resolved, "items"); ok {
+				if err := walkSpec(itemsRec, path); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	if fieldsRec, ok := findRecordField(rootRec, "field"); ok {
+		for _, fld := range fieldsRec.Fields {
+			if fRec, ok := fld.Value.(lkal.Record); ok {
+				if err := walkSpec(fRec, fld.Key); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for _, name := range defOrder {
+		if err := walkSpec(defs[name], "def/"+name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkOrderedSetMap(mapSpec lkal.Record, defs map[string]lkal.Record, path string) error {
+	uniqueBy := stringListSet(mapSpec, "unique-by")
+	hasUniqueOrder := uniqueBy[orderedset.OrderField]
+
+	valRec, hasVal := findRecordField(mapSpec, "value")
+	var (
+		valResolved   lkal.Record
+		orderFieldRec lkal.Record
+		hasOrderField bool
+	)
+	if hasVal {
+		valResolved = derefTypeSpec(valRec, defs)
+		if typeAllows(valResolved, "record") {
+			if fieldsRec, ok := findRecordField(valResolved, "field"); ok {
+				orderFieldRec, hasOrderField = findRecordField(fieldsRec, orderedset.OrderField)
+			}
+		}
+	}
+
+	if hasOrderField && !hasUniqueOrder {
+		return fmt.Errorf("resource: %s: map value declares field %q without unique-by = [%q]", path, orderedset.OrderField, orderedset.OrderField)
+	}
+	if !hasUniqueOrder {
+		return nil
+	}
+
+	if !hasVal || enumFieldValue(valResolved, "type") != "record" || hasFieldKey(valResolved, "types") {
+		return fmt.Errorf("resource: %s: ordered set map value must have single type .record", path)
+	}
+	if !hasOrderField {
+		return fmt.Errorf("resource: %s: ordered set map value must explicitly declare field %q", path, orderedset.OrderField)
+	}
+	orderResolved := derefTypeSpec(orderFieldRec, defs)
+	if hasFieldKey(orderFieldRec, "default") || hasFieldKey(orderResolved, "default") {
+		return fmt.Errorf("resource: %s/*/%s: ordered set order field cannot declare default", path, orderedset.OrderField)
+	}
+	if !boolFieldValue(orderFieldRec, "required") {
+		return fmt.Errorf("resource: %s/*/%s: ordered set order field must set required = true", path, orderedset.OrderField)
+	}
+	if enumFieldValue(orderResolved, "type") != "int" || hasFieldKey(orderResolved, "types") {
+		return fmt.Errorf("resource: %s/*/%s: ordered set order field must have single type .int", path, orderedset.OrderField)
 	}
 	return nil
 }

@@ -503,6 +503,10 @@ func checkObjectsCore(t *testing.T, newStore func(*testing.T) tenant.Store) {
 			t.Fatalf("winners=%d conflicts=%d, want winners=1 conflicts=%d", winners, conflicts, workers-1)
 		}
 	})
+
+	t.Run("OrderedSetRoundTrip", func(t *testing.T) {
+		checkObjectsOrderedSetRoundTrip(t, newStore(t))
+	})
 }
 
 func TestObjects(t *testing.T) {

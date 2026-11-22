@@ -326,6 +326,7 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 		"core/drt/store_tenant_drt_test.go":              "//go:build drt",
 		"core/drt/watchcache_drt_test.go":                "//go:build drt",
 		"core/drt/liveness_drt_test.go":                  "//go:build drt",
+		"core/drt/orderedset_drt_test.go":                "//go:build drt",
 		"core/drt/store_etcd_drt_test.go":                "//go:build drt && etcd",
 	} {
 		firstLine, _, _ := strings.Cut(readRepoFile(t, rel), "\n")
@@ -366,6 +367,12 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 			"func TestLivenessGeneratorCoverage(",
 			"func TestLivenessComparisonDetectsEveryFieldMutation(",
 			"func TestLivenessDRTCatchesBrokenImplementations(",
+		},
+		"core/drt/orderedset_drt_test.go": {
+			"func TestOrderedSetMatchesLeanModel(",
+			"func TestOrderedSetCasesReachEveryOutcome(",
+			"func TestOrderedSetComparisonDetectsEveryFieldMutation(",
+			"func TestOrderedSetDRTCatchesBrokenImplementations(",
 		},
 	} {
 		body := readRepoFile(t, rel)

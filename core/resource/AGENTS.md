@@ -2,7 +2,7 @@
 
 `core/resource/` で作業するときの指示。共通の指示はリポジトリのルートの `AGENTS.md` にあり、ここには繰り返さない。パスはリポジトリのルートからの相対で書いてある。
 
-- 決定は、封筒が ADR 0009 と ADR 0025、参照の検査が ADR 0010 と ADR 0026、LKAL v0.2 スキーマによる kind 検査・既定値補完・参照規則の導出が ADR 0027。ライブラリであり、HTTP の API サーバ、認証、`/x/` へのスキーマとポリシーの保存、Patch（ADR 0012）、所有権（ADR 0013）は無い。
+- 決定は、封筒が ADR 0009 と ADR 0025、参照の検査が ADR 0010 と ADR 0026、LKAL v0.2 スキーマによる kind 検査・既定値補完・参照規則の導出が ADR 0027、順序付きレコード集合が ADR 0011 と ADR 0028。ライブラリであり、HTTP の API サーバ、認証、`/x/` へのスキーマとポリシーの保存、Patch（ADR 0012）、所有権（ADR 0013）は無い。
 - トップレベルは `meta`・`spec`・`status` のレコードだけで、`meta` の欄は `group`・`kind`・`name`・`labels`・`uid`・`revision`・`generation` に限る（封筒の共通スキーマは `core/resource/envelope/envelope.schema.lkal` に埋め込み、ファズ試験で `CheckCandidateShape` との一致を確かめる）。`meta/kind` はキーの `<kind>` と同じ小文字のラベルである（CamelCase は拒否する）。`meta/group` は不在が `core` を表し、`"core"` と書いた文書は拒否する。
 - 書き込みの入口は 2 つ。`Update` は `labels` と `spec` を、`UpdateStatus` は `status` を置き換える。入口の外の欄とサーバが決める欄（`uid`・`generation`・`revision`・`since`）は、不在か現在値と同じでなければ拒否し、黙って無視しない。`meta/revision` が mod revision と違えば競合で返す。
 - `generation` は作成時に 1 で、`Update` で `spec` が `lkal.Equal` で変わったときだけ 1 増える。`observedGeneration` は書き手が決め、`generation` を超える値・後戻り・欄の削除を拒否する。条件の `since` は `UpdateStatus` が決め、`state` が同じあいだは引き継ぐ。
@@ -13,5 +13,7 @@
 - 認可は `refs.Authorizer` で、Cedar との結合は `core/resource/refcedar`。resource は `Nayutar::Object::"<tenant>/<修飾つき kind>/<name>"` で、評価の誤りが 1 つでもあれば拒否する。`Objects` の `Create` と `Update` は principal を取り、`Config` は `Tenant`・`Schemas`（修飾つき kind から `CompileKindSchema` 済みの `*KindSchema` への表）・`Authorizer` を持つ。`Create` と `Update` は `spec` に `schema.Complete` で既定値を実体化してから封筒遷移・`spec` スキーマ検査・参照検査に渡し、`UpdateStatus` は `status` スキーマ検査に通す（閉じた `status` レコードには封筒の `observedGeneration` と `condition` を自動で補う）。`refs.Schema` は各 `KindSchema` の `spec` 内の `.ref` の `targets` から導出し、未登録の kind は fail-closed で拒否する。
 - `Objects` は参照先を読み、その mod revision の比較と、`ref/` の逆参照索引（値は空）の Put・Delete を、本体と同じ 1 回の `Txn` に入れる。参照先の削除は止めない。読めない値の削除は `ref/` を走査し、本体の比較を付けて分けて消す。
 - 参照の検査の意味論は `refs` と Lean モデル `spec/Nayutar/Refs.lean` が定める（DRT `nayutar-drt refs`）。定理 8 個（ADR 0026 の決定 11）の証明は `spec/Nayutar/Proofs/Refs.lean` にある。
+- `CompileKindSchema` は `root`（`meta`・`spec`・`status`）と全 `def` の `.map` に対し順序付きレコード集合の双方向検査を行う（`unique-by` に `"order"` を含むなら `value` は単一 `.record` かつ `field "order"` を明示宣言し `required = true`・`default` なし・単一 `type = .int`、逆に `value` が `field "order"` を宣言するなら `unique-by` に `"order"` が必須）。
+- 順序付きレコード集合の純粋な核は `core/resource/orderedset`（`OrderField = "order"`・`Step = 10`、`Entries`/`EntriesReverse`、`FromItems`、`FromKeyedSlice`/`ToKeyedSlice`/`ToKeyedSliceReverse`、`OrderBefore`/`OrderAfter`/`OrderBetween`/`Renumber`）。意味論は `spec/Nayutar/OrderedSet.lean` が定め（DRT `nayutar-drt orderedset`）、誤りは 6 種類（`malformed`・`duplicateKey`・`duplicateOrder`・`reservedField`・`gapExhausted`・`overflow`）で段ごとの全走査により欄順序に不変。定理 9 個（ADR 0028 の決定 7）の主張は `spec/Nayutar/Statements/OrderedSet.lean` と `spec/comparator.json` に、証明は `spec/Nayutar/Proofs/OrderedSet.lean` にあり、`lake comparator` が検査する。
 - ストア結合の試験は、インメモリ実装と 3 メンバーの etcd（ビルドタグ `etcd`）で走る。
 - まだ無いもの：ラベルの文法、条件の `message` と接頭辞つきの条件型、猶予つきの削除とファイナライザ、一覧と watch、Kubernetes からの取り込みの変換、`Binding` の identityHash つきの解決、コントローラの読み取りの制限。

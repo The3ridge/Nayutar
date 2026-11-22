@@ -1,6 +1,6 @@
 ---
 title: 順序付きレコード集合は文書内の明示的な整数 order 葉で表す
-status: proposed
+status: accepted
 date: 2026-11-17
 depends-on: ["0001"]
 ---
@@ -55,3 +55,4 @@ plugins {
 - [[0012]]：本表現をそのまま LKAL-JSON / LKAL-CBOR のレコードとしてシリアライズする。
 - [[0013]]：`.../order` 葉を通常の葉パスとして所有権管理するモデルを定める。
 - [[0027]]：LKAL v0.2 スキーマの `.map`（`unique-by = ["order"]`）を `core/resource` の種別検査に適用する。
+- [[0028]]：本決定の実現方式（`CompileKindSchema` の双方向検査、`core/resource/orderedset` の正順・逆順抽出と 2 形態の配列往復変換、疎な採番ヘルパ、Lean 4 モデル・9 定理・DRT）を定める。

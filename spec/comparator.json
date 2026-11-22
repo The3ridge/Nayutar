@@ -35,7 +35,16 @@
     "Nayutar.Refs.accepted_put_compared",
     "Nayutar.Refs.denied_ignores_presence",
     "Nayutar.Refs.accepted_delta_valid",
-    "Nayutar.Refs.delete_clears_index"
+    "Nayutar.Refs.delete_clears_index",
+    "Nayutar.OrderedSet.entries_strictly_sorted",
+    "Nayutar.OrderedSet.entries_strips_order",
+    "Nayutar.OrderedSet.entries_complete_and_sound",
+    "Nayutar.OrderedSet.entries_reverse_eq_reverse",
+    "Nayutar.OrderedSet.entries_eqv_invariant",
+    "Nayutar.OrderedSet.fromItems_entries_roundtrip",
+    "Nayutar.OrderedSet.keyed_slice_roundtrip",
+    "Nayutar.OrderedSet.orderBetween_strict",
+    "Nayutar.OrderedSet.renumber_preserves_order"
   ],
   "permitted_axioms": [
     "propext",
