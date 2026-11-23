@@ -219,8 +219,8 @@ jobs:
           go-version: "1.27.3"
           cache: false
 
-      - name: Vet store, liveness and resource packages with etcd tag
-        run: go vet -tags etcd ./core/store/... ./core/liveness/... ./core/resource/...
+      - name: Vet store, liveness, resource and wire packages with etcd tag
+        run: go vet -tags etcd ./core/store/... ./core/liveness/... ./core/resource/... ./core/wire/...
 
       - name: Install etcd
         env:
@@ -237,15 +237,15 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/etcd" --strip-components=1
           "${RUNNER_TEMP}/etcd/etcd" --version
 
-      - name: Run the store contract, linearizability checks, node registry and resource objects against etcd
+      - name: Run the store contract, linearizability checks, node registry, resource objects and wire handler against etcd
         env:
           NAYUTAR_ETCD_BIN: ${{ runner.temp }}/etcd/etcd
-        run: go test -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/
+        run: go test -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/ ./core/wire/
 
-      - name: Run the store contract, linearizability checks, node registry and resource objects against etcd with race detector
+      - name: Run the store contract, linearizability checks, node registry, resource objects and wire handler against etcd with race detector
         env:
           NAYUTAR_ETCD_BIN: ${{ runner.temp }}/etcd/etcd
-        run: go test -race -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/
+        run: go test -race -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/ ./core/wire/
 
   vulncheck:
     name: Vulnerability scan (govulncheck)

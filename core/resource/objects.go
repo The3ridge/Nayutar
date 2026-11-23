@@ -11,6 +11,7 @@ import (
 
 	"github.com/Kaikei-e/LKAL"
 	"github.com/Kaikei-e/Nayutar/core/resource/envelope"
+	"github.com/Kaikei-e/Nayutar/core/resource/patch"
 	"github.com/Kaikei-e/Nayutar/core/resource/refs"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
@@ -27,8 +28,9 @@ var (
 )
 
 const (
-	placeholderTenant  = "t"
-	deleteBackRefBatch = 64
+	placeholderTenant   = "t"
+	deleteBackRefBatch  = 64
+	defaultListPageSize = 512
 )
 
 // Config configures clock, randomness, tenant identity, per-kind LKAL v0.2 schemas, and authorization for an Objects handle.
@@ -124,6 +126,23 @@ func newUUIDv4(r io.Reader) (string, error) {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// DecodeObject validates a stored object value against obj and stored envelope invariants,
+// returning the decoded envelope with meta/revision set to modRev.
+func DecodeObject(obj keyspace.Object, value []byte, modRev store.Rev) (lkal.Record, error) {
+	key, err := objectKey(obj)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	if modRev < 1 {
+		return lkal.Record{}, fmt.Errorf("%w: %s: mod revision %d must be >= 1", ErrCorrupt, key, modRev)
+	}
+	doc, err := decodeStored(obj, key, value)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	return envelope.WithRevision(doc, int64(modRev)), nil
 }
 
 func decodeStored(obj keyspace.Object, key string, value []byte) (lkal.Record, error) {
@@ -455,6 +474,81 @@ func (o *Objects) Get(ctx context.Context, obj keyspace.Object) (lkal.Record, er
 	return envelope.WithRevision(doc, int64(modRev)), nil
 }
 
+// ListOptions configures a snapshot or paginated List call.
+type ListOptions struct {
+	AtRev    store.Rev
+	Limit    int
+	Continue string
+}
+
+// ListResult holds the decoded envelopes, snapshot revision, and pagination cursor of a List call.
+type ListResult struct {
+	Items    []lkal.Record
+	Revision store.Rev
+	Continue string
+}
+
+// List reads objects of (group, kind) from the store, decoding and validating each stored envelope.
+// When opts.Limit == 0, List paginates all remaining pages at a single snapshot revision and returns Continue == "".
+// When opts.Limit > 0, List returns a single page of up to opts.Limit items along with Continue if more items remain.
+func (o *Objects) List(ctx context.Context, group, kind string, opts ListOptions) (ListResult, error) {
+	prefix, err := keyspace.ObjectPrefix(group, kind)
+	if err != nil {
+		path := "meta/kind"
+		if keyspace.ValidateGroup(group) != nil {
+			path = "meta/group"
+		}
+		return ListResult{}, &envelope.Error{Kind: envelope.ErrMalformed, Path: path, Detail: err.Error()}
+	}
+	if err := store.ValidateRange(prefix, opts.AtRev, opts.Limit, opts.Continue); err != nil {
+		return ListResult{}, err
+	}
+
+	var (
+		kvs  []store.KV
+		rev  store.Rev
+		cont string
+	)
+	if opts.Limit > 0 {
+		kvs, rev, cont, err = o.st.Range(ctx, prefix, opts.AtRev, opts.Limit, opts.Continue)
+		if err != nil {
+			return ListResult{}, fmt.Errorf("list %s: %w", prefix, err)
+		}
+	} else {
+		page, snapRev, nextCont, err := o.st.Range(ctx, prefix, opts.AtRev, defaultListPageSize, opts.Continue)
+		if err != nil {
+			return ListResult{}, fmt.Errorf("list %s: %w", prefix, err)
+		}
+		rev = snapRev
+		kvs = append(kvs, page...)
+		for nextCont != "" {
+			page, _, nextCont, err = o.st.Range(ctx, prefix, rev, defaultListPageSize, nextCont)
+			if err != nil {
+				return ListResult{}, fmt.Errorf("list %s: %w", prefix, err)
+			}
+			kvs = append(kvs, page...)
+		}
+	}
+
+	items := make([]lkal.Record, 0, len(kvs))
+	for _, kv := range kvs {
+		parsed, err := keyspace.ParseRel(placeholderTenant, kv.Key)
+		if err != nil || parsed.Family != keyspace.FamilyObject || parsed.Object.Group != group || parsed.Object.Kind != kind {
+			return ListResult{}, fmt.Errorf("%w: unexpected key %q under prefix %q", ErrCorrupt, kv.Key, prefix)
+		}
+		doc, err := DecodeObject(parsed.Object, kv.Value, kv.ModRev)
+		if err != nil {
+			return ListResult{}, err
+		}
+		items = append(items, doc)
+	}
+	return ListResult{
+		Items:    items,
+		Revision: rev,
+		Continue: cont,
+	}, nil
+}
+
 // Update completes declared spec defaults, validates and applies a spec or labels change to an existing object using optimistic concurrency.
 func (o *Objects) Update(ctx context.Context, principal refs.Principal, candidate lkal.Record) (lkal.Record, error) {
 	return o.applyUpdate(
@@ -554,6 +648,131 @@ func (o *Objects) applyUpdate(
 		return lkal.Record{}, &envelope.Error{Kind: envelope.ErrConflict, Path: "meta/revision", Detail: "concurrent modification"}
 	}
 	return envelope.WithRevision(next, int64(newRev)), nil
+}
+
+// Patch applies an ordered patch sequence through the spec/labels entrance to obj,
+// completing declared spec defaults, validating the kind schema and references, and committing with CAS.
+func (o *Objects) Patch(ctx context.Context, principal refs.Principal, obj keyspace.Object, ops []patch.Op) (lkal.Record, error) {
+	return o.applyPatch(
+		ctx,
+		principal,
+		obj,
+		patch.EntranceSpec,
+		ops,
+		func(ks *KindSchema, canonical lkal.Record) (lkal.Record, error) {
+			return ks.completeCandidate(canonical)
+		},
+		envelope.Update,
+		func(ks *KindSchema, next lkal.Record) error {
+			return ks.validateSpec(next)
+		},
+	)
+}
+
+// PatchStatus applies an ordered patch sequence through the status entrance to obj,
+// validating the status schema and committing with CAS.
+func (o *Objects) PatchStatus(ctx context.Context, obj keyspace.Object, ops []patch.Op) (lkal.Record, error) {
+	return o.applyPatch(
+		ctx,
+		refs.Principal{},
+		obj,
+		patch.EntranceStatus,
+		ops,
+		func(_ *KindSchema, canonical lkal.Record) (lkal.Record, error) {
+			return canonical, nil
+		},
+		func(old lkal.Record, modRev int64, canonical lkal.Record) (lkal.Record, error) {
+			return envelope.UpdateStatus(old, modRev, canonical, envelope.Timestamp(o.now()))
+		},
+		func(ks *KindSchema, next lkal.Record) error {
+			return ks.validateStatus(next)
+		},
+	)
+}
+
+func (o *Objects) applyPatch(
+	ctx context.Context,
+	principal refs.Principal,
+	obj keyspace.Object,
+	entrance patch.Entrance,
+	ops []patch.Op,
+	prepareCandidate func(ks *KindSchema, canonical lkal.Record) (lkal.Record, error),
+	transition func(old lkal.Record, modRev int64, prepared lkal.Record) (lkal.Record, error),
+	validateNext func(ks *KindSchema, next lkal.Record) error,
+) (lkal.Record, error) {
+	key, err := objectKey(obj)
+	if err != nil {
+		return lkal.Record{}, &envelope.Error{Kind: envelope.ErrMalformed, Path: "meta", Detail: err.Error()}
+	}
+	encodedOps, err := patch.Encode(ops)
+	if err != nil {
+		return lkal.Record{}, asMalformedPatchErr(err)
+	}
+	canonicalOps, err := patch.Decode(encodedOps)
+	if err != nil {
+		return lkal.Record{}, asMalformedPatchErr(err)
+	}
+	ks, err := o.lookupKindSchema(obj)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	old, modRev, err := o.readStored(ctx, obj, key)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	if _, err := refs.DeleteDelta(old); err != nil {
+		return lkal.Record{}, err
+	}
+	patched, err := patch.ApplyEntrance(entrance, old, int64(modRev), canonicalOps)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	canonical, err := canonicalize(patched)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	prepared, err := prepareCandidate(ks, canonical)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	next, err := transition(old, int64(modRev), prepared)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	if err := validateNext(ks, next); err != nil {
+		return lkal.Record{}, err
+	}
+	delta, infos, err := o.checkRefs(ctx, obj, principal, old, true, next)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	if lkal.Equal(next, old) {
+		return envelope.WithRevision(old, int64(modRev)), nil
+	}
+	val, err := Encode(next)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	cmps, storeOps, err := buildWriteTxn(key, val, store.Cmp{Key: key, Op: store.CmpEqual, ModRev: modRev}, obj, delta, infos)
+	if err != nil {
+		return lkal.Record{}, err
+	}
+	ok, newRev, err := o.st.Txn(ctx, cmps, storeOps)
+	if err != nil {
+		return lkal.Record{}, fmt.Errorf("patch %s: %w", key, err)
+	}
+	if !ok {
+		return lkal.Record{}, &envelope.Error{Kind: envelope.ErrConflict, Path: "meta/revision", Detail: "concurrent modification"}
+	}
+	return envelope.WithRevision(next, int64(newRev)), nil
+}
+
+func asMalformedPatchErr(err error) error {
+	var pe *patch.Error
+	if errors.As(err, &pe) && pe.Kind == patch.Malformed {
+		return pe
+	}
+	return &patch.Error{Kind: patch.Malformed, Detail: err.Error()}
 }
 
 // Delete removes obj and its back-reference keys from the store, requiring its current mod revision to equal rev when rev != 0.

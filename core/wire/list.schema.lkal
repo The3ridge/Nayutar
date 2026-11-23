@@ -1,0 +1,31 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:core/wire-list/0.1"
+version = "0.1.0"
+doc = "Resource list response schema."
+
+root {
+  field "revision" {
+    type = .int
+    required = true
+    min = 0
+  }
+  field "continue" {
+    type = .string
+    min-length = 1
+  }
+  field "items" {
+    type = .map
+    required = true
+    key {
+      min-length = 1
+      max-length = 253
+      pattern = "[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*"
+    }
+    value {
+      type = .record
+      open = true
+    }
+  }
+}

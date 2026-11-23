@@ -1,0 +1,37 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:core/wire-error/0.1"
+version = "0.1.0"
+doc = "Structured wire error response schema."
+
+def "error" {
+  type = .record
+  field "kind" {
+    type = .enum
+    required = true
+    values = [.badRequest, .unauthorized, .forbidden, .notFound, .methodNotAllowed, .notAcceptable, .conflict, .gone, .tooLarge, .unsupportedMediaType, .unprocessable, .observed, .refKind, .refNotFound, .pathNotFound, .internal, .unavailable]
+  }
+  field "status" {
+    type = .int
+    required = true
+    min = 400
+    max = 599
+  }
+  field "path" {
+    type = .string
+    min-length = 1
+  }
+  field "message" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+}
+
+root {
+  field "error" {
+    required = true
+    use = &def/error
+  }
+}

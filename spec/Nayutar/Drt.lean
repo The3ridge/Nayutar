@@ -7,6 +7,7 @@ import Nayutar.Drt.Liveness
 import Nayutar.Drt.Envelope
 import Nayutar.Drt.Refs
 import Nayutar.Drt.OrderedSet
+import Nayutar.Drt.Patch
 
 open Lean
 open Nayutar.Fixture
@@ -109,6 +110,8 @@ def main (args : List String) : IO UInt32 := do
     runSuite Nayutar.Drt.Refs.parseCase Nayutar.Drt.Refs.caseToJson
   | ["orderedset"] =>
     runSuite Nayutar.Drt.OrderedSet.parseCase Nayutar.Drt.OrderedSet.caseToJson
+  | ["patch"] =>
+    runSuite Nayutar.Drt.Patch.parseCase Nayutar.Drt.Patch.caseToJson
   | _ =>
-    IO.eprintln "usage: nayutar-drt register|store|keyspace|watchcache|liveness|envelope|refs|orderedset"
+    IO.eprintln "usage: nayutar-drt register|store|keyspace|watchcache|liveness|envelope|refs|orderedset|patch"
     return 2

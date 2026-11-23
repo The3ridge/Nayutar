@@ -1,0 +1,39 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:core/patch/0.1"
+version = "0.1.0"
+doc = "Ordered-set patch document schema."
+
+def "op" {
+  type = .record
+  field "order" {
+    type = .int
+    required = true
+  }
+  field "op" {
+    type = .enum
+    required = true
+    values = [.test, .set, .del]
+  }
+  field "path" {
+    type = .string
+    required = true
+    min-length = 1
+    pattern = "[^$/][^/]*(/[^$/][^/]*)*"
+  }
+  field "value" { type = .any }
+}
+
+root {
+  field "patch" {
+    type = .map
+    required = true
+    unique-by = ["order"]
+    key {
+      min-length = 1
+      pattern = "[^$/][^/]*"
+    }
+    value { use = &def/op }
+  }
+}

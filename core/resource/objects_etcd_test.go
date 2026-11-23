@@ -58,7 +58,7 @@ func isolatedRoot(t *testing.T) store.Store {
 }
 
 func TestEtcdObjects(t *testing.T) {
-	checkObjectsCore(t, func(t *testing.T) tenant.Store {
+	newTenantStore := func(t *testing.T) tenant.Store {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -71,6 +71,9 @@ func TestEtcdObjects(t *testing.T) {
 			t.Fatalf("View(acme): %v", err)
 		}
 		return v
-	})
+	}
+	checkObjectsCore(t, newTenantStore)
+	checkObjectsPatchAndList(t, newTenantStore)
 	checkObjectsRefsSuite(t, isolatedRoot)
+	checkObjectsPatchRefs(t, isolatedRoot)
 }

@@ -44,7 +44,17 @@
     "Nayutar.OrderedSet.fromItems_entries_roundtrip",
     "Nayutar.OrderedSet.keyed_slice_roundtrip",
     "Nayutar.OrderedSet.orderBetween_strict",
-    "Nayutar.OrderedSet.renumber_preserves_order"
+    "Nayutar.OrderedSet.renumber_preserves_order",
+    "Nayutar.Patch.apply_empty",
+    "Nayutar.Patch.apply_preserves_unique",
+    "Nayutar.Patch.apply_append",
+    "Nayutar.Patch.apply_eqv_invariant",
+    "Nayutar.Patch.diff_refl",
+    "Nayutar.Patch.diff_apply_roundtrip",
+    "Nayutar.Patch.toRecord_fromRecord_roundtrip",
+    "Nayutar.Patch.patch_is_stored",
+    "Nayutar.Patch.patch_bumps_generation_iff_spec_changes",
+    "Nayutar.Patch.patchStatus_is_stored"
   ],
   "permitted_axioms": [
     "propext",

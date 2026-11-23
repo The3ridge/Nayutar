@@ -294,14 +294,14 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(job, "go vet -tags etcd ./core/store/... ./core/liveness/... ./core/resource/...") {
-		t.Error("store-etcd job must run go vet with the etcd tag on the store, liveness and resource packages")
+	if !strings.Contains(job, "go vet -tags etcd ./core/store/... ./core/liveness/... ./core/resource/... ./core/wire/...") {
+		t.Error("store-etcd job must run go vet with the etcd tag on the store, liveness, resource and wire packages")
 	}
-	if !strings.Contains(job, "go test -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/\n") {
-		t.Error("store-etcd job must run the store, liveness and resource tests with the etcd tag")
+	if !strings.Contains(job, "go test -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/ ./core/wire/\n") {
+		t.Error("store-etcd job must run the store, liveness, resource and wire tests with the etcd tag")
 	}
-	if !strings.Contains(job, "go test -race -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/\n") {
-		t.Error("store-etcd job must run the store, liveness and resource tests with -race and the etcd tag")
+	if !strings.Contains(job, "go test -race -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/ ./core/wire/\n") {
+		t.Error("store-etcd job must run the store, liveness, resource and wire tests with -race and the etcd tag")
 	}
 	if !strings.Contains(drt, `-tags "drt etcd" ./core/drt/...`) {
 		t.Error("drt workflow must run the differential tests against etcd")
@@ -322,11 +322,13 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 		"core/store/watchcache/watchcache_etcd_test.go":  "//go:build etcd",
 		"core/liveness/registry_etcd_test.go":            "//go:build etcd",
 		"core/resource/objects_etcd_test.go":             "//go:build etcd",
+		"core/wire/wire_etcd_test.go":                    "//go:build etcd",
 		"core/drt/store_drt_test.go":                     "//go:build drt",
 		"core/drt/store_tenant_drt_test.go":              "//go:build drt",
 		"core/drt/watchcache_drt_test.go":                "//go:build drt",
 		"core/drt/liveness_drt_test.go":                  "//go:build drt",
 		"core/drt/orderedset_drt_test.go":                "//go:build drt",
+		"core/drt/patch_drt_test.go":                     "//go:build drt",
 		"core/drt/store_etcd_drt_test.go":                "//go:build drt && etcd",
 	} {
 		firstLine, _, _ := strings.Cut(readRepoFile(t, rel), "\n")
@@ -373,6 +375,12 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 			"func TestOrderedSetCasesReachEveryOutcome(",
 			"func TestOrderedSetComparisonDetectsEveryFieldMutation(",
 			"func TestOrderedSetDRTCatchesBrokenImplementations(",
+		},
+		"core/drt/patch_drt_test.go": {
+			"func TestPatchMatchesLeanModel(",
+			"func TestPatchCasesReachEveryOutcome(",
+			"func TestPatchComparisonDetectsEveryFieldMutation(",
+			"func TestPatchDRTCatchesBrokenImplementations(",
 		},
 	} {
 		body := readRepoFile(t, rel)

@@ -11,4 +11,4 @@
 - `Manager` が、テナント×`(group, kind)` ごとのキャッシュ（`o/<group>/<kind>/`。キーはテナントの中の相対キー）を、最初に使われたときに作る。コンパクションは `Manager.Compact` を通す。各キャッシュに追いつく時間（`ReadWait`）を与えたうえで、準備のできたキャッシュの閉じたリビジョンの最小値より先へは進まない。キャッシュが保持する最古のリビジョンは境界にしない（変更の少ないキャッシュがコンパクションを止め続けるため）。この境界はプロセスの中だけのもので、`Store.Compact` を直接呼ぶ者と他のプロセスには及ばない。
 - 4 不変条件（欠落なし・重複なし・順序保存・ブックマーク単調性）は Lean モデルの上の定理（`Nayutar.WatchCache` の `watch_no_loss`・`watch_no_duplicates`・`watch_order_preserved`・`bookmark_monotone`）で、主張は `spec/Nayutar/Statements/WatchCache.lean`、証明は `spec/Nayutar/Proofs/WatchCache.lean` にある。定理が述べるのはモデルである。Go の `window` とは DRT で、外殻とは試験と線形化可能性検査（`core/store/watchcache` の `TestLinearizability`、etcd では `TestEtcdLinearizability`）で結ぶ。
 - 外殻の試験は、インメモリ実装と 3 メンバーの etcd（ビルドタグ `etcd`）の両方で走る。上流の watch の終了は試験用の上流が注入する。etcd の障害は、リーダーの停止だけを注入する（`TestEtcdLinearizabilityAcrossLeaderFailure`）。過半数喪失と分断をキャッシュの下で注入する試験は無い。
-- まだ無いもの：HTTP の配信と 410 への対応づけ、封筒の解釈、認可と `Ref` のフィルタ、所有権・逆参照・Binding のキャッシュ、使われなくなったキャッシュの破棄、複数のプロセスにまたがるコンパクションの境界。
+- まだ無いもの：認可と `Ref` のフィルタ、所有権・逆参照・Binding のキャッシュ、使われなくなったキャッシュの破棄、複数のプロセスにまたがるコンパクションの境界（HTTP/2 の配信と `410 Gone` への対応づけは `core/wire` にある。ADR 0029）。

@@ -21,6 +21,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
   - 参照の検査と逆参照索引：ADR 0010 → ADR 0026（`Binding` の identityHash つきの解決とコントローラの読み取りの制限は、Export と `Binding` の ADR に残してある）
   - LKAL v0.2 スキーマによる宣言・内部記録・リソース kind・参照規則の検査と既定値補完：ADR 0027（`/x/<identityHash>/schema/<version>` への保存は Export と `Binding` の ADR に残してある）
   - 順序付きレコード集合（`core/resource/orderedset` と `CompileKindSchema` の双方向検査）：ADR 0011 → ADR 0028
+  - HTTP/2 LKAL-JSON ワイヤ層（`core/wire`）と 2 入口 Patch / Diff（`core/resource/patch` と `Objects.Patch` / `PatchStatus`）：ADR 0012 → ADR 0029（タグなし決定論的 CBOR は G2 に残してある）
 - 所有権のモデル本体、Export と `Binding`、ESR の証明、Kubernetes との差分試験は後続 ADR の範囲であり、まだ実装していない。
 - コードを書き始める前に、その決定を ADR として起票する。
 
@@ -36,6 +37,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
 | watch キャッシュ | `core/store/watchcache/AGENTS.md` | 3 層の構成、閉じたリビジョン、保持とコンパクション、4 不変条件 |
 | ノードの死活監視 | `core/liveness/AGENTS.md` | 判定の規則、ノードの記録、退避の許可、シミュレーション |
 | リソースの封筒 | `core/resource/AGENTS.md` | 封筒の形、2 つの書き込みの入口、更新規則、ストア結合 |
+| HTTP/2 ワイヤ層 | `core/wire/AGENTS.md` | HTTP/2 LKAL-JSON ハンドラ・スキーマ・クライアント・`410 Gone`・DoS 防止 |
 | 開発環境の宣言と kisage | `config/AGENTS.md` | `config/dev.lkal`、開発用 etcd、kisage の使い方と信頼境界 |
 | エージェントハーネス | `scripts/agent-harness/AGENTS.md` | ガードが止めるものの一覧、編集後の検査、自己検査 |
 
@@ -52,7 +54,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
 
 ## ハーネスが止めるもの
 
-例外の無い約束は、文章ではなくフックで強制している（Claude Code は `.claude/settings.json`、Codex は `.codex/hooks.json`。本体は `scripts/agent-harness/`）。止められたら、迂回せずにユーザーに渡す。
+例外の無い約束は、文章ではなくフックで強制している（Claude Code は `.claude/settings.json`、Codex は `.codex/hooks.json`。本体は `scripts/agent-harness/`）。止められたら、迂回せずにユーザーに渡す（TUI の折り返し改行混入を防ぐため、長大な 1 行コマンドや複数スニペットは避け、リポジトリ外の scratch スクリプト＋65 文字以内の冪等な実行ワンライナー 1 本にして提示する）。
 
 - **ユーザーが所有するファイルは編集しない。** 定理の主張（`spec/Nayutar/Statements.lean`、`spec/Nayutar/Statements/`、`spec/comparator.json`）、主張が import するフィクスチャ（`spec/Nayutar/Fixture.lean`、`spec/Nayutar/Fixture/`）、Lean のビルド設定（`spec/lakefile.toml`、`spec/lakefile.lean`、`spec/lake-manifest.json`、`spec/lean-toolchain`）、kisage の信頼境界、`.env` や鍵、`.git/` の内部、許可された以外の `.yaml` / `.yml`。
 - **`git push`、PR の作成・マージ、ワークフローの実行・再実行・キャンセルは、ユーザーに実行してもらう。** フックと署名の回避（`--no-verify` など）、`lake comparator --inadvisably-no-sandbox`、`lake update` も拒否する。
@@ -89,7 +91,7 @@ test -z "$(gofmt -l .)" && go vet ./...
 go test ./...
 govulncheck -test ./... && govulncheck -test -tags drt,etcd ./...   # 既知脆弱性の検査（標準ライブラリの指摘は最新の 1.27 系でないと消えない。v1.10.0 を 1.27 系の toolchain でビルドして入れる）
 go test -tags drt ./core/drt/...   # Lean–Go DRT（lake が必要）
-go test -tags etcd ./core/store/... ./core/liveness/ ./core/resource/    # 契約テスト・線形化可能性検査・障害注入・相乗り計測・ノード登録簿・封筒のストア結合を 3 メンバーの etcd にかける（etcd が必要。バイナリは NAYUTAR_ETCD_BIN か PATH の etcd）
+go test -tags etcd ./core/store/... ./core/liveness/ ./core/resource/ ./core/wire/    # 契約テスト・線形化可能性検査・障害注入・相乗り計測・ノード登録簿・封筒・ワイヤ層のストア結合を 3 メンバーの etcd にかける（etcd が必要。バイナリは NAYUTAR_ETCD_BIN か PATH の etcd）
 go test -tags "drt etcd" ./core/drt/...        # Lean–Go DRT を 3 メンバーの etcd にもかける（lake と etcd が必要）
 (cd spec && lake build)
 go build -o "${TMPDIR:-/tmp}/check-protected-theorems" ./cmd/check-protected-theorems && "${TMPDIR:-/tmp}/check-protected-theorems" # 欠落を終了コード 1 で拒否する

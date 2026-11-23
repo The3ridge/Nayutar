@@ -5,6 +5,7 @@ import Nayutar.Liveness
 import Nayutar.Envelope
 import Nayutar.Refs
 import Nayutar.OrderedSet
+import Nayutar.Patch
 
 namespace Nayutar
 
