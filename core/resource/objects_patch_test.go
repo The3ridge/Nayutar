@@ -11,6 +11,7 @@ import (
 	"github.com/Kaikei-e/Nayutar/core/resource"
 	"github.com/Kaikei-e/Nayutar/core/resource/envelope"
 	"github.com/Kaikei-e/Nayutar/core/resource/orderedset"
+	"github.com/Kaikei-e/Nayutar/core/resource/ownership"
 	"github.com/Kaikei-e/Nayutar/core/resource/patch"
 	"github.com/Kaikei-e/Nayutar/core/resource/refs"
 	"github.com/Kaikei-e/Nayutar/core/store"
@@ -413,12 +414,18 @@ func checkObjectsPatchRefs(t *testing.T, newRoot func(*testing.T) store.Store) {
 		}
 
 		wlObj := keyspace.Object{Group: "core", Kind: "workload", Name: "app"}
-		// Bob is denied referencing secret b.
-		var re *refs.Error
+		// Bob modifying Alice's owned leaf spec/primary fails with K201 OwnershipConflict.
 		if _, err := objs.Patch(ctx, cedarBob, wlObj, []patch.Op{
 			{Kind: patch.OpSet, Path: "spec/primary", Value: lkal.Ref{"secret", "b"}},
+		}); !errors.Is(err, ownership.ErrOwnershipConflict) {
+			t.Fatalf("Patch(bob foreign leaf) = %v, want ownership.ErrOwnershipConflict (K201)", err)
+		}
+		// Bob adding a ref on an unowned leaf spec/secondary is denied by Cedar.
+		var re *refs.Error
+		if _, err := objs.Patch(ctx, cedarBob, wlObj, []patch.Op{
+			{Kind: patch.OpSet, Path: "spec/secondary", Value: lkal.Ref{"secret", "b"}},
 		}); !errors.As(err, &re) || re.Kind != refs.ErrDenied {
-			t.Fatalf("Patch(bob ref b) = %v, want refs.ErrDenied", err)
+			t.Fatalf("Patch(bob ref b on unowned leaf) = %v, want refs.ErrDenied", err)
 		}
 		// Alice referencing absent secret without labels is denied by Cedar (no existence leak).
 		re = nil
@@ -427,7 +434,7 @@ func checkObjectsPatchRefs(t *testing.T, newRoot func(*testing.T) store.Store) {
 		}); !errors.As(err, &re) || re.Kind != refs.ErrDenied {
 			t.Fatalf("Patch(alice ref missing under label policy) = %v, want refs.ErrDenied", err)
 		}
-		// Under an allow-all authorizer, referencing absent secret returns refs.ErrNotFound.
+		// Under an allow-all authorizer, referencing absent secret on unowned leaf returns refs.ErrNotFound.
 		allowAllObjs := resource.NewObjects(v, resource.Config{
 			Tenant:     "acme",
 			Schemas:    refSuiteSchemas,
@@ -436,7 +443,7 @@ func checkObjectsPatchRefs(t *testing.T, newRoot func(*testing.T) store.Store) {
 		})
 		re = nil
 		if _, err := allowAllObjs.Patch(ctx, testPrincipal, wlObj, []patch.Op{
-			{Kind: patch.OpSet, Path: "spec/primary", Value: lkal.Ref{"secret", "missing"}},
+			{Kind: patch.OpSet, Path: "spec/secondary", Value: lkal.Ref{"secret", "missing"}},
 		}); !errors.As(err, &re) || re.Kind != refs.ErrNotFound {
 			t.Fatalf("Patch(allow-all ref missing) = %v, want refs.ErrNotFound", err)
 		}

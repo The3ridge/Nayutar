@@ -16,6 +16,7 @@ import (
 	"github.com/Kaikei-e/LKAL"
 	"github.com/Kaikei-e/Nayutar/core/resource"
 	"github.com/Kaikei-e/Nayutar/core/resource/envelope"
+	"github.com/Kaikei-e/Nayutar/core/resource/ownership"
 	"github.com/Kaikei-e/Nayutar/core/resource/patch"
 	"github.com/Kaikei-e/Nayutar/core/resource/refs"
 	"github.com/Kaikei-e/Nayutar/core/store"
@@ -37,6 +38,7 @@ type Config struct {
 	Caches           *watchcache.Manager
 	Schemas          resource.Schemas
 	Authorizer       refs.Authorizer
+	ScopeResolver    resource.ScopeResolver
 	Authenticate     func(*http.Request) (refs.Principal, error)
 	DefaultPrincipal refs.Principal
 	Now              func() time.Time
@@ -51,6 +53,7 @@ type Handler struct {
 	caches           *watchcache.Manager
 	schemas          resource.Schemas
 	authorizer       refs.Authorizer
+	scopeResolver    resource.ScopeResolver
 	authenticate     func(*http.Request) (refs.Principal, error)
 	defaultPrincipal refs.Principal
 	now              func() time.Time
@@ -95,6 +98,7 @@ func New(cfg Config) (*Handler, error) {
 		caches:           cfg.Caches,
 		schemas:          clonedSchemas,
 		authorizer:       cfg.Authorizer,
+		scopeResolver:    cfg.ScopeResolver,
 		authenticate:     cfg.Authenticate,
 		defaultPrincipal: cfg.DefaultPrincipal,
 		now:              cfg.Now,
@@ -110,6 +114,11 @@ const (
 	routeCollection routeKind = iota + 1
 	routeObject
 	routeStatus
+	routeApply
+	routePrune
+	routeExplain
+	routeAdopt
+	routeRelease
 )
 
 type parsedRoute struct {
@@ -138,10 +147,24 @@ func parseRoute(escapedPath string) (parsedRoute, bool) {
 	case 6:
 		return parsedRoute{kind: routeObject, tenant: parts[1], group: parts[3], res: parts[4], name: parts[5]}, true
 	case 7:
-		if parts[6] != "status" {
+		var rk routeKind
+		switch parts[6] {
+		case "status":
+			rk = routeStatus
+		case "apply":
+			rk = routeApply
+		case "prune":
+			rk = routePrune
+		case "explain":
+			rk = routeExplain
+		case "adopt":
+			rk = routeAdopt
+		case "release":
+			rk = routeRelease
+		default:
 			return parsedRoute{}, false
 		}
-		return parsedRoute{kind: routeStatus, tenant: parts[1], group: parts[3], res: parts[4], name: parts[5]}, true
+		return parsedRoute{kind: rk, tenant: parts[1], group: parts[3], res: parts[4], name: parts[5]}, true
 	default:
 		return parsedRoute{}, false
 	}
@@ -155,6 +178,12 @@ func allowHeader(rk routeKind) string {
 		return "GET, PUT, PATCH, DELETE"
 	case routeStatus:
 		return "PUT, PATCH"
+	case routeApply:
+		return "PUT"
+	case routePrune, routeAdopt, routeRelease:
+		return "POST"
+	case routeExplain:
+		return "GET"
 	default:
 		return ""
 	}
@@ -168,6 +197,12 @@ func methodAllowed(rk routeKind, method string) bool {
 		return method == http.MethodGet || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
 	case routeStatus:
 		return method == http.MethodPut || method == http.MethodPatch
+	case routeApply:
+		return method == http.MethodPut
+	case routePrune, routeAdopt, routeRelease:
+		return method == http.MethodPost
+	case routeExplain:
+		return method == http.MethodGet
 	default:
 		return false
 	}
@@ -265,6 +300,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPatch:
 			h.handlePatchStatus(w, r, route, query)
 		}
+	case routeApply:
+		h.handleApplyOrPrune(w, r, route, query, principal, true)
+	case routePrune:
+		h.handleApplyOrPrune(w, r, route, query, principal, false)
+	case routeExplain:
+		h.handleExplain(w, r, route, query)
+	case routeAdopt:
+		h.handleResolve(w, r, route, query, principal, true)
+	case routeRelease:
+		h.handleResolve(w, r, route, query, principal, false)
 	}
 }
 
@@ -507,11 +552,12 @@ func (h *Handler) openWriteObjects(ctx context.Context, tenantName string) (*res
 		return nil, mapBackendError(err)
 	}
 	return resource.NewObjects(view, resource.Config{
-		Now:        h.now,
-		Rand:       h.rand,
-		Tenant:     tenantName,
-		Schemas:    h.schemas,
-		Authorizer: h.authorizer,
+		Now:           h.now,
+		Rand:          h.rand,
+		Tenant:        tenantName,
+		Schemas:       h.schemas,
+		Authorizer:    h.authorizer,
+		ScopeResolver: h.scopeResolver,
 	}), nil
 }
 
@@ -1089,6 +1135,208 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request, route par
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) handleApplyOrPrune(
+	w http.ResponseWriter,
+	r *http.Request,
+	route parsedRoute,
+	query map[string]string,
+	principal refs.Principal,
+	isApply bool,
+) {
+	if err := rejectUnknownParams(query, "expect", "ownerRev"); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	expectVal, hasExpect := query["expect"]
+	if hasExpect && strings.TrimSpace(expectVal) == "" {
+		h.writeError(w, &Error{
+			Kind:    KindBadRequest,
+			Status:  http.StatusBadRequest,
+			Code:    ownership.CodeInvalidInput,
+			Path:    "expect",
+			Message: `query parameter "expect" must not be empty`,
+		})
+		return
+	}
+	ownerRevVal, hasOwnerRev, werr := parseNonNegInt64Param(query, "ownerRev")
+	if werr != nil {
+		h.writeError(w, werr)
+		return
+	}
+	if hasOwnerRev && ownerRevVal == 0 {
+		h.writeError(w, &Error{
+			Kind:    KindBadRequest,
+			Status:  http.StatusBadRequest,
+			Code:    ownership.CodeInvalidInput,
+			Path:    "ownerRev",
+			Message: `query parameter "ownerRev" must be >= 1`,
+		})
+		return
+	}
+	body, werr := h.readBody(w, r, MediaTypeResource)
+	if werr != nil {
+		h.writeError(w, werr)
+		return
+	}
+	cand, err := resource.Decode(body)
+	if err != nil {
+		h.writeError(w, decodeJSONError(err))
+		return
+	}
+	obj, err := envelope.Object(cand)
+	if err != nil {
+		h.writeError(w, mapBackendError(err))
+		return
+	}
+	if obj != route.object() {
+		h.writeError(w, &Error{
+			Kind:    KindForbidden,
+			Status:  http.StatusForbidden,
+			Path:    "meta",
+			Message: "candidate identity must match request path",
+		})
+		return
+	}
+	if !h.hasKind(route.group, route.res) {
+		h.writeError(w, &Error{
+			Kind:    KindNotFound,
+			Status:  http.StatusNotFound,
+			Path:    "meta/kind",
+			Message: "unknown resource kind",
+		})
+		return
+	}
+	objects, werr := h.openWriteObjects(r.Context(), route.tenant)
+	if werr != nil {
+		h.writeError(w, werr)
+		return
+	}
+	opts := resource.ApplyOptions{
+		Expect:           expectVal,
+		ExpectedOwnerRev: store.Rev(ownerRevVal),
+	}
+	var res resource.ApplyResult
+	if isApply {
+		res, err = objects.Apply(r.Context(), principal, cand, opts)
+	} else {
+		res, err = objects.Prune(r.Context(), principal, cand, opts)
+	}
+	if err != nil {
+		h.writeError(w, mapBackendError(err))
+		return
+	}
+	encoded, err := resource.Encode(res.Object)
+	if err != nil {
+		h.writeError(w, internalWireError())
+		return
+	}
+	w.Header().Set(HeaderOwnerRevision, strconv.FormatInt(int64(res.OwnerRevision), 10))
+	status := http.StatusOK
+	if isApply && res.Created {
+		status = http.StatusCreated
+	}
+	h.writeJSON(w, status, encoded)
+}
+
+func (h *Handler) handleExplain(w http.ResponseWriter, r *http.Request, route parsedRoute, query map[string]string) {
+	if err := h.requireEmptyBody(r); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if err := rejectUnknownParams(query, "atRev"); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	atRev, _, werr := parseNonNegInt64Param(query, "atRev")
+	if werr != nil {
+		h.writeError(w, werr)
+		return
+	}
+	if !h.hasKind(route.group, route.res) {
+		h.writeError(w, &Error{
+			Kind:    KindNotFound,
+			Status:  http.StatusNotFound,
+			Path:    "meta/kind",
+			Message: "unknown resource kind",
+		})
+		return
+	}
+	objects, werr := h.openWriteObjects(r.Context(), route.tenant)
+	if werr != nil {
+		h.writeError(w, werr)
+		return
+	}
+	exp, err := objects.Explain(r.Context(), route.object(), store.Rev(atRev))
+	if err != nil {
+		h.writeError(w, mapBackendError(err))
+		return
+	}
+	encoded, err := EncodeExplain(exp)
+	if err != nil {
+		h.writeError(w, internalWireError())
+		return
+	}
+	w.Header().Set(HeaderOwnerRevision, strconv.FormatInt(exp.OwnerRevision, 10))
+	h.writeJSON(w, http.StatusOK, encoded)
+}
+
+func (h *Handler) handleResolve(
+	w http.ResponseWriter,
+	r *http.Request,
+	route parsedRoute,
+	query map[string]string,
+	principal refs.Principal,
+	isAdopt bool,
+) {
+	if err := rejectUnknownParams(query); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	body, werr := h.readBody(w, r, MediaTypeResource)
+	if werr != nil {
+		h.writeError(w, werr)
+		return
+	}
+	opts, err := DecodeResolveRequest(body)
+	if err != nil {
+		we := decodeJSONError(err)
+		we.Code = ownership.CodeInvalidInput
+		h.writeError(w, we)
+		return
+	}
+	if !h.hasKind(route.group, route.res) {
+		h.writeError(w, &Error{
+			Kind:    KindNotFound,
+			Status:  http.StatusNotFound,
+			Path:    "meta/kind",
+			Message: "unknown resource kind",
+		})
+		return
+	}
+	objects, werr := h.openWriteObjects(r.Context(), route.tenant)
+	if werr != nil {
+		h.writeError(w, werr)
+		return
+	}
+	var res resource.ResolveResult
+	if isAdopt {
+		res, err = objects.Adopt(r.Context(), principal, route.object(), opts)
+	} else {
+		res, err = objects.Release(r.Context(), principal, route.object(), opts)
+	}
+	if err != nil {
+		h.writeError(w, mapBackendError(err))
+		return
+	}
+	encoded, err := EncodeExplain(res.Explanation)
+	if err != nil {
+		h.writeError(w, internalWireError())
+		return
+	}
+	w.Header().Set(HeaderOwnerRevision, strconv.FormatInt(res.Explanation.OwnerRevision, 10))
+	h.writeJSON(w, http.StatusOK, encoded)
 }
 
 func setSecurityHeaders(hdr http.Header) {

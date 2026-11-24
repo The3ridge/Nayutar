@@ -9,7 +9,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
 個人と AI コーディングエージェントで **Kubernetes の本格的な代替** となるオーケストレータを作るプロジェクト。宣言の基盤に [LKAL](https://github.com/Kaikei-e/LKAL)、所有権と apply の中核に [kisage](https://github.com/Kaikei-e/kisage) の葉パス所有権モデルを使う。
 
 - 動かさない前提：[ADR 0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)。設計判断はこれに反してはならない。前提を変えるときは 0001 を `supersedes` する ADR を書く。
-- 現状：中核は Go モジュール（言語版の下限は 1.27.3、toolchain は固定しない）、仕様は [`spec/`](spec/) の独立した Lean 4 パッケージ（ADR 0002）。次のものは実装済みである。決定の ADR はどれも `accepted`、矢印の先は実現方式の ADR で `proposed` である。
+- 現状：中核は Go モジュール（言語版の下限は 1.27.3、toolchain は固定しない）、仕様は [`spec/`](spec/) の独立した Lean 4 パッケージ（ADR 0002）。次のものは実装済みである。決定の ADR はどれも `accepted`、矢印の先は実現方式の ADR である。
   - DRT の枠組み（`core/drt` と Lean の実行ファイル `nayutar-drt`）と定理の主張を守る仕組み：ADR 0017
   - ストア契約（`core/store`）とそのインメモリ参照実装・etcd アダプタ・Lean モデル・DRT・線形化可能性検査：ADR 0004。契約は固有の Lean 定理を持たず、Lean モデルを DRT のオラクルとして使う。
   - G0 検証ゲートの合格条件：ADR 0018
@@ -22,7 +22,9 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
   - LKAL v0.2 スキーマによる宣言・内部記録・リソース kind・参照規則の検査と既定値補完：ADR 0027（`/x/<identityHash>/schema/<version>` への保存は Export と `Binding` の ADR に残してある）
   - 順序付きレコード集合（`core/resource/orderedset` と `CompileKindSchema` の双方向検査）：ADR 0011 → ADR 0028
   - HTTP/2 LKAL-JSON ワイヤ層（`core/wire`）と 2 入口 Patch / Diff（`core/resource/patch` と `Objects.Patch` / `PatchStatus`）：ADR 0012 → ADR 0029（タグなし決定論的 CBOR は G2 に残してある）
-- 所有権のモデル本体、Export と `Binding`、ESR の証明、Kubernetes との差分試験は後続 ADR の範囲であり、まだ実装していない。
+  - 葉パス所有権（`core/resource/ownership` と `Objects`・`core/wire` の単一 CAS `Txn` 更新）：ADR 0013 → ADR 0030
+  - containerd v2.3 の直接駆動と CNI・netns 管理（`core/node` と `cmd/lk-node`）：ADR 0014 → ADR 0031（CSI Node は後続 ADR）
+- Export と `Binding`、CSI Node、ESR の証明、Kubernetes との差分試験は後続 ADR の範囲であり、まだ実装していない。
 - コードを書き始める前に、その決定を ADR として起票する。
 
 ## 領域ごとの指示
@@ -38,6 +40,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
 | ノードの死活監視 | `core/liveness/AGENTS.md` | 判定の規則、ノードの記録、退避の許可、シミュレーション |
 | リソースの封筒 | `core/resource/AGENTS.md` | 封筒の形、2 つの書き込みの入口、更新規則、ストア結合 |
 | HTTP/2 ワイヤ層 | `core/wire/AGENTS.md` | HTTP/2 LKAL-JSON ハンドラ・スキーマ・クライアント・`410 Gone`・DoS 防止 |
+| ノードのコンテナ実行 | `core/node/AGENTS.md` | 純粋ライフサイクル核、containerd v2.3・netns・CNI、`nodesim`、`cmd/lk-node` |
 | 開発環境の宣言と kisage | `config/AGENTS.md` | `config/dev.lkal`、開発用 etcd、kisage の使い方と信頼境界 |
 | エージェントハーネス | `scripts/agent-harness/AGENTS.md` | ガードが止めるものの一覧、編集後の検査、自己検査 |
 

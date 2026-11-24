@@ -1,0 +1,45 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:core/ownership/0.1"
+version = "0.1.0"
+doc = "Compact leaf-path ownership trie schema."
+
+def "node" {
+  type = .record
+  field "s" {
+    type = .enum
+    values = [.owned, .unowned, .defaulted]
+  }
+  field "a" {
+    type = .int
+    min = 0
+  }
+  field "o" {
+    type = .enum
+    values = [.created, .modified]
+  }
+  field "w" {
+    type = .bool
+  }
+  field "c" {
+    type = .map
+    value { use = &def/node }
+  }
+}
+
+root {
+  field "actors" {
+    type = .list
+    required = true
+    min-items = 1
+    items {
+      type = .string
+      min-length = 1
+    }
+  }
+  field "trie" {
+    type = .map
+    value { use = &def/node }
+  }
+}

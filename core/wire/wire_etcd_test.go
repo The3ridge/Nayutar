@@ -172,6 +172,35 @@ func TestEtcdWireHTTP2(t *testing.T) {
 			if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{FromRev: firstRev}); !errors.Is(err, wire.ErrGone) {
 				t.Fatalf("Watch(old rev on etcd) err = %v, want ErrGone", err)
 			}
+
+			// Ownership subresources (Apply / Explain / Prune) over 3-member etcd.
+			ownObj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "owned"}
+			applied, err := env.client.Apply(ctx, "acme", ownObj, rec(
+				fld("meta", rec(fld("kind", lkal.String("workload")), fld("name", lkal.String("owned")))),
+				fld("spec", rec(fld("payload", lkal.String("v1")))),
+			), resource.ApplyOptions{})
+			if err != nil || !applied.Created || applied.OwnerRevision < 1 {
+				t.Fatalf("Apply(etcd): res=%+v err=%v", applied, err)
+			}
+			exp, err := env.client.Explain(ctx, "acme", ownObj, 0)
+			if err != nil || exp.OwnerRevision != int64(applied.OwnerRevision) {
+				t.Fatalf("Explain(etcd): exp=%+v err=%v", exp, err)
+			}
+			pruned, err := env.client.Prune(ctx, "acme", ownObj, rec(
+				fld("meta", rec(fld("kind", lkal.String("workload")), fld("name", lkal.String("owned")))),
+				fld("spec", rec()),
+			), resource.ApplyOptions{Expect: exp.Expect, ExpectedOwnerRev: applied.OwnerRevision})
+			if err != nil {
+				t.Fatalf("Prune(etcd): %v", err)
+			}
+			prunedSpec, _ := getRecord(pruned.Object, "spec")
+			if _, exists := getField(prunedSpec, "payload"); exists {
+				t.Fatal("Prune(etcd) did not delete retired created leaf")
+			}
+
+			if err := env.client.Delete(ctx, "acme", ownObj, 0); err != nil {
+				t.Fatalf("Delete(owned): %v", err)
+			}
 			if err := env.client.Delete(ctx, "acme", webObj, 0); err != nil {
 				t.Fatalf("Delete: %v", err)
 			}

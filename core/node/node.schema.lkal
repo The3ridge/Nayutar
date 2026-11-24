@@ -1,0 +1,208 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:node/config/0.1"
+version = "0.1.0"
+doc = "Schema for lk-node containerd, CNI, and single-container unit configuration."
+
+def "cni-range" {
+  type = .record
+  field "subnet" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "gateway" {
+    type = .string
+    min-length = 1
+  }
+  field "rangeStart" {
+    type = .string
+    min-length = 1
+  }
+  field "rangeEnd" {
+    type = .string
+    min-length = 1
+  }
+}
+
+def "mount" {
+  type = .record
+  field "source" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "destination" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "type" {
+    type = .string
+    default = "bind"
+    min-length = 1
+  }
+  field "options" {
+    type = .list
+    items {
+      type = .string
+      min-length = 1
+    }
+  }
+}
+
+def "containerd" {
+  type = .record
+  field "socket" {
+    type = .string
+    default = "/run/containerd/containerd.sock"
+    min-length = 1
+  }
+  field "namespace" {
+    type = .string
+    default = "nayutar"
+    min-length = 1
+    max-length = 63
+    pattern = "[a-z0-9]([a-z0-9._-]*[a-z0-9])?"
+  }
+  field "snapshotter" {
+    type = .string
+    default = "overlayfs"
+    min-length = 1
+  }
+}
+
+def "cni" {
+  type = .record
+  field "binDir" {
+    type = .string
+    default = "/opt/cni/bin"
+    min-length = 1
+  }
+  field "netnsDir" {
+    type = .string
+    default = "/run/netns"
+    min-length = 1
+  }
+  field "network" {
+    type = .string
+    default = "nayutar0"
+    min-length = 1
+    max-length = 63
+    pattern = "[a-z0-9]([a-z0-9._-]*[a-z0-9])?"
+  }
+  field "bridge" {
+    type = .string
+    default = "nayutar0"
+    min-length = 1
+    max-length = 15
+    pattern = "[a-z0-9]([a-z0-9._-]*[a-z0-9])?"
+  }
+  field "dataDir" {
+    type = .string
+    min-length = 1
+  }
+  field "ranges" {
+    type = .map
+    required = true
+    min-entries = 1
+    unique-by = ["subnet"]
+    key {
+      min-length = 1
+      max-length = 63
+      pattern = "[A-Za-z0-9._-]+"
+    }
+    value { use = &def/cni-range }
+  }
+}
+
+def "unit" {
+  type = .record
+  field "id" {
+    type = .string
+    required = true
+    min-length = 1
+    max-length = 63
+    pattern = "[a-z0-9]([a-z0-9._-]*[a-z0-9])?"
+  }
+  field "image" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "command" {
+    type = .list
+    items { type = .string }
+  }
+  field "args" {
+    type = .list
+    items { type = .string }
+  }
+  field "env" {
+    type = .map
+    key {
+      min-length = 1
+      pattern = "[A-Za-z_][A-Za-z0-9_]*"
+    }
+    value { type = .string }
+  }
+  field "mounts" {
+    type = .map
+    unique-by = ["destination"]
+    key {
+      min-length = 1
+      max-length = 63
+      pattern = "[A-Za-z0-9._-]+"
+    }
+    value { use = &def/mount }
+  }
+  field "workingDir" {
+    type = .string
+    min-length = 1
+  }
+  field "restart" {
+    type = .enum
+    default = .onFailure
+    values = [.never, .onFailure, .always]
+  }
+  field "stopGraceMs" {
+    type = .int
+    default = 10000
+    min = 0
+    max = 3600000
+  }
+  field "backoffBaseMs" {
+    type = .int
+    default = 1000
+    min = 1
+    max = 3600000
+  }
+  field "backoffMaxMs" {
+    type = .int
+    default = 300000
+    min = 1
+    max = 86400000
+  }
+  field "backoffResetMs" {
+    type = .int
+    default = 60000
+    min = 0
+    max = 86400000
+  }
+}
+
+root {
+  field "containerd" {
+    required = true
+    use = &def/containerd
+  }
+  field "cni" {
+    required = true
+    use = &def/cni
+  }
+  field "unit" {
+    required = true
+    use = &def/unit
+  }
+}

@@ -1,0 +1,56 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:core/wire-explain/0.1"
+version = "0.1.0"
+doc = "Ownership explain response schema."
+
+def "leaf" {
+  type = .record
+  field "state" {
+    type = .enum
+    required = true
+    values = [.owned, .unowned, .defaulted]
+  }
+  field "owner" {
+    type = .string
+    min-length = 1
+  }
+  field "origin" {
+    type = .enum
+    values = [.created, .modified]
+  }
+  field "expect" {
+    type = .string
+    required = true
+    pattern = "ksg-tok-v1:[0-9a-f]{64}"
+  }
+}
+
+root {
+  field "revision" {
+    type = .int
+    required = true
+    min = 1
+  }
+  field "ownerRevision" {
+    type = .int
+    required = true
+    min = 1
+  }
+  field "expect" {
+    type = .string
+    required = true
+    pattern = "ksg-doc-v1:[0-9a-f]{64}"
+  }
+  field "defaultOwner" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "leaves" {
+    type = .map
+    required = true
+    value { use = &def/leaf }
+  }
+}

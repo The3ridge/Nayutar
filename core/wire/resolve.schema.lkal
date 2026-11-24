@@ -1,0 +1,24 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:core/wire-resolve/0.1"
+version = "0.1.0"
+doc = "Ownership adopt and release request schema."
+
+root {
+  field "path" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "expect" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "ownerRevision" {
+    type = .int
+    required = true
+    min = 0
+  }
+}

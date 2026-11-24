@@ -2,7 +2,7 @@
 
 `core/drt/` で作業するときの指示。共通の指示はリポジトリのルートの `AGENTS.md` にあり、ここには繰り返さない。パスはリポジトリのルートからの相対で書いてある。
 
-- Lean–Go の差分ランダム試験（DRT）は `go test -tags drt ./core/drt/...` で実行する。通常の `go test ./...` では走らず、Lean を必要としない。スイートは `register`・`store`・`keyspace`・`watchcache`・`liveness`・`envelope`・`refs`・`orderedset`・`patch` の 9 つで、`nayutar-drt <スイート>` が標準入力のケースを 1 行ずつ処理する。
+- Lean–Go の差分ランダム試験（DRT）は `go test -tags drt ./core/drt/...` で実行する。通常の `go test ./...` では走らず、Lean を必要としない。スイートは `register`・`store`・`keyspace`・`watchcache`・`liveness`・`envelope`・`refs`・`orderedset`・`patch`・`ownership`・`node` の 11 個で、`nayutar-drt <スイート>` が標準入力のケースを 1 行ずつ処理する。
 - 件数は `NAYUTAR_DRT_CASES`、乱数シードは `NAYUTAR_DRT_SEED` で指定でき、不一致時は再現用のシードとケースが出力される。
 
 ## 対になる Go と Lean
@@ -20,5 +20,7 @@
 | `refs` | `core/resource/refs` | `spec/Nayutar/Refs.lean` |
 | `orderedset` | `core/resource/orderedset` | `spec/Nayutar/OrderedSet.lean` |
 | `patch` | `core/resource/patch` | `spec/Nayutar/Patch.lean` |
+| `ownership` | `core/resource/ownership` | `spec/Nayutar/Ownership.lean` |
+| `node` | `core/node/lifecycle` | `spec/Nayutar/Node.lean` |
 
 Lean 側の入口は `spec/Nayutar/Drt.lean` と `spec/Nayutar/Drt/` にある。スイートを足すときは、両方の側とこの表を更新する。

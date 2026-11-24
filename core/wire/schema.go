@@ -21,10 +21,18 @@ var listSchemaBytes []byte
 //go:embed watch_event.schema.lkal
 var watchEventSchemaBytes []byte
 
+//go:embed explain.schema.lkal
+var explainSchemaBytes []byte
+
+//go:embed resolve.schema.lkal
+var resolveSchemaBytes []byte
+
 var (
 	errorSchema      *schema.Schema
 	listSchema       *schema.Schema
 	watchEventSchema *schema.Schema
+	explainSchema    *schema.Schema
+	resolveSchema    *schema.Schema
 )
 
 func init() {
@@ -40,6 +48,14 @@ func init() {
 	watchEventSchema, err = schema.Compile("watch_event.schema.lkal", watchEventSchemaBytes)
 	if err != nil {
 		panic("wire: embedded watch_event.schema.lkal failed to compile: " + err.Error())
+	}
+	explainSchema, err = schema.Compile("explain.schema.lkal", explainSchemaBytes)
+	if err != nil {
+		panic("wire: embedded explain.schema.lkal failed to compile: " + err.Error())
+	}
+	resolveSchema, err = schema.Compile("resolve.schema.lkal", resolveSchemaBytes)
+	if err != nil {
+		panic("wire: embedded resolve.schema.lkal failed to compile: " + err.Error())
 	}
 }
 
@@ -60,6 +76,18 @@ func WatchEventSchema() *schema.Schema { return watchEventSchema }
 
 // WatchEventSchemaBytes returns a copy of the embedded watch_event.schema.lkal source.
 func WatchEventSchemaBytes() []byte { return slices.Clone(watchEventSchemaBytes) }
+
+// ExplainSchema returns the compiled LKAL v0.2 schema for ownership explain responses.
+func ExplainSchema() *schema.Schema { return explainSchema }
+
+// ExplainSchemaBytes returns a copy of the embedded explain.schema.lkal source.
+func ExplainSchemaBytes() []byte { return slices.Clone(explainSchemaBytes) }
+
+// ResolveSchema returns the compiled LKAL v0.2 schema for adopt/release requests.
+func ResolveSchema() *schema.Schema { return resolveSchema }
+
+// ResolveSchemaBytes returns a copy of the embedded resolve.schema.lkal source.
+func ResolveSchemaBytes() []byte { return slices.Clone(resolveSchemaBytes) }
 
 func encodeTopFields(fields []lkal.Field, s *schema.Schema) ([]byte, error) {
 	f, err := lkal.FromJSON([]byte(emptyLKALJSON))

@@ -18,6 +18,7 @@ import (
 func FuzzDecodeError(f *testing.F) {
 	f.Add([]byte(`{"$lkal":"0.1","error":{"kind":{"$enum":"badRequest"},"status":400,"message":"bad"}}`))
 	f.Add([]byte(`{"$lkal":"0.1","error":{"kind":{"$enum":"pathNotFound"},"status":422,"path":"spec/x","message":"missing"}}`))
+	f.Add([]byte(`{"$lkal":"0.1","error":{"kind":{"$enum":"conflict"},"status":409,"code":"K201","path":"spec/replicas","message":"conflict","diagnostics":{"0":{"order":10,"code":"K201","path":"spec/replicas","reason":"owned by other","nextAction":"release"}}}}`))
 	f.Add([]byte(`{"$lkal":"0.1"}`))
 	f.Add([]byte(`{`))
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -33,8 +34,42 @@ func FuzzDecodeError(f *testing.F) {
 			t.Fatalf("EncodeError emitted newline: %s", reEncoded)
 		}
 		we2, err := wire.DecodeError(reEncoded)
-		if err != nil || *we2 != *we {
+		if err != nil || !we2.Equal(we) {
 			t.Fatalf("DecodeError roundtrip mismatch: %+v vs %+v (err=%v)", we2, we, err)
+		}
+	})
+}
+
+func FuzzDecodeExplainAndResolve(f *testing.F) {
+	f.Add([]byte(`{"$lkal":"0.1","revision":2,"ownerRevision":3,"expect":"ksg-doc-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","defaultOwner":"User:alice","leaves":{"spec/replicas":{"state":{"$enum":"owned"},"owner":"User:alice","origin":{"$enum":"created"},"expect":"ksg-tok-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}`))
+	f.Add([]byte(`{"$lkal":"0.1","path":"spec/replicas","expect":"ksg-tok-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","ownerRevision":1}`))
+	f.Add([]byte(`{`))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if exp, err := wire.DecodeExplain(data); err == nil {
+			re, err := wire.EncodeExplain(exp)
+			if err != nil {
+				t.Fatalf("EncodeExplain failed after DecodeExplain: %v", err)
+			}
+			if bytes.ContainsRune(re, '\n') {
+				t.Fatalf("EncodeExplain emitted newline: %s", re)
+			}
+			exp2, err := wire.DecodeExplain(re)
+			if err != nil || exp2.Revision != exp.Revision || exp2.OwnerRevision != exp.OwnerRevision || exp2.Expect != exp.Expect || exp2.DefaultOwner != exp.DefaultOwner || len(exp2.Leaves) != len(exp.Leaves) {
+				t.Fatalf("DecodeExplain roundtrip mismatch: %+v vs %+v (err=%v)", exp2, exp, err)
+			}
+		}
+		if opts, err := wire.DecodeResolveRequest(data); err == nil {
+			re, err := wire.EncodeResolveRequest(opts)
+			if err != nil {
+				t.Fatalf("EncodeResolveRequest failed after DecodeResolveRequest: %v", err)
+			}
+			if bytes.ContainsRune(re, '\n') {
+				t.Fatalf("EncodeResolveRequest emitted newline: %s", re)
+			}
+			opts2, err := wire.DecodeResolveRequest(re)
+			if err != nil || opts2 != opts {
+				t.Fatalf("DecodeResolveRequest roundtrip mismatch: %+v vs %+v (err=%v)", opts2, opts, err)
+			}
 		}
 	})
 }
@@ -92,6 +127,11 @@ func FuzzHandlerRequests(f *testing.F) {
 	f.Add(http.MethodPatch, "/t/acme/o/core/workload/w", "", wire.MediaTypeResource, wire.MediaTypePatch, []byte(`{"$lkal":"0.1","patch":{}}`))
 	f.Add(http.MethodDelete, "/t/acme/o/core/workload/w", "rev=1", "application/cbor", "", []byte(nil))
 	f.Add(http.MethodTrace, "/t/acme/o/core/workload/w/status", "bad=1", "", "", []byte("x"))
+	f.Add(http.MethodPut, "/t/acme/o/core/workload/w/apply", "ownerRev=0", wire.MediaTypeResource, wire.MediaTypeResource, []byte(`{"$lkal":"0.1","meta":{"kind":"workload","name":"w"}}`))
+	f.Add(http.MethodPost, "/t/acme/o/core/workload/w/prune", "", wire.MediaTypeResource, wire.MediaTypeResource, []byte(`{"$lkal":"0.1","meta":{"kind":"workload","name":"w"}}`))
+	f.Add(http.MethodGet, "/t/acme/o/core/workload/w/explain", "atRev=0", wire.MediaTypeResource, "", []byte(nil))
+	f.Add(http.MethodPost, "/t/acme/o/core/workload/w/adopt", "", wire.MediaTypeResource, wire.MediaTypeResource, []byte(`{"$lkal":"0.1","path":"spec/replicas","expect":"x","ownerRevision":1}`))
+	f.Add(http.MethodPost, "/t/acme/o/core/workload/w/release", "", wire.MediaTypeResource, wire.MediaTypeResource, []byte(`{"$lkal":"0.1","path":"spec/replicas","expect":"x","ownerRevision":1}`))
 
 	root := memstore.New()
 	reg := tenant.NewRegistry(root)

@@ -1,6 +1,6 @@
 ---
 title: CRI を経由せず containerd の Go クライアントをノードエージェントから直接駆動する
-status: proposed
+status: accepted
 date: 2026-11-17
 depends-on: ["0001"]
 ---
@@ -18,7 +18,7 @@ CRI を経由すると、独自モデルから `PodSandbox` への変換層と K
 1. ノードエージェント `lk-node` は CRI を使用せず、containerd の Go クライアント（`github.com/containerd/containerd/v2/client`）を通じて containerd を直接駆動する。
 2. 依存する containerd は LTS 系列である 2.3 系に固定する。
 3. サンドボックスおよびネットワーク名前空間（netns）の管理は `lk-node` 自身が行い、CNI プラグインは exec で直接呼び出し、CSI Node サービスは gRPC で直接呼び出す。
-4. 初期段階の最小実装は `runc` を用いた単一コンテナの起動・停止・再起動・終了コード報告、および CNI の `bridge` と `host-local` に限定する。
+4. 初期段階の最小実装は `runc` を用いた単一コンテナの起動・停止・再起動・終了コード報告、および CNI の `loopback`・`bridge`・`host-local` に限定する（CSI Node 実装は後続のストレージ実現 ADR に分ける）。
 5. `runwasi`、Kata Containers、Firecracker、Cloud Hypervisor（いずれも適合性は未確認である）、User Namespaces、およびコンテナの in-place 更新は後回しとする。
 
 ## 根拠（調査結果・出典）
@@ -26,7 +26,7 @@ CRI を経由すると、独自モデルから `PodSandbox` への変換層と K
 - 内部前提との整合：[[0001]] の前提 4 に従いコンテナ実行・ネットワーク・ストレージのデータプレーンには containerd・CNI・CSI を再利用しつつ、前提 5 に従い kubelet の Pod 抽象への追従は避ける。また [[0002]] により中核実装を Go に統一しているため、containerd の Go クライアントをそのまま組み込める。
 - CRI の役割：CRI は kubelet がクラスタコンポーネントを再コンパイルせずに多様なコンテナランタイムを使うためのプラグインインターフェースであり、`RuntimeService`（`PodSandbox` とコンテナのライフサイクル）および `ImageService` を定義していることを一次資料で確認した（https://kubernetes.io/docs/concepts/architecture/cri/ ）。
 - containerd の版と Go クライアント：containerd は最新が v2.4.2 であり、v2.3 系が LTS ライン（v2.3.7 が 2026-10-13 公開、2028-04-30 までサポート）であること、約 4 か月ごとにマイナー版が出荷されることを一次資料で確認した（https://github.com/containerd/containerd/blob/main/RELEASES.md ）。また `github.com/containerd/containerd/v2/client` が containerd を直接駆動する公式手順として案内されていることを確認した（https://github.com/containerd/containerd/blob/main/docs/getting-started.md ）。
-- CNI・CSI・User Namespaces：CNI プラグインは環境変数（`CNI_COMMAND` として `ADD`/`DEL`/`CHECK`/`GC`/`VERSION`、`CNI_CONTAINERID`、`CNI_NETNS`、`CNI_IFNAME`、`CNI_PATH`）と標準入力 JSON で呼ぶ実行ファイルであり、構成リストの `plugins` 配列を `ADD` 時は正順、`DEL` 時は逆順で連鎖することを一次資料で確認した（https://github.com/containernetworking/cni/blob/main/SPEC.md ）。CSI は Identity・Controller・Node の gRPC サービスを定義し、Kubernetes の CSI サイドカー群は Kubernetes API オブジェクトを watch するため再利用できないことを一次資料で確認した（https://github.com/container-storage-interface/spec ）。なお Nomad がサイドカーなしで CSI を直接呼ぶ設計の具体的教訓は未確認である。また Kubernetes の Pod User Namespaces（`hostUsers: false`）は v1.36 で GA となっていることを確認しているが、初期範囲には含めない。
+- CNI・CSI・User Namespaces：CNI プラグインは環境変数（`CNI_COMMAND` として `ADD`/`DEL`/`CHECK`/`GC`/`VERSION`/`STATUS`、`CNI_CONTAINERID`、`CNI_NETNS`、`CNI_IFNAME`、`CNI_PATH`）と標準入力 JSON で呼ぶ実行ファイルであり、非ゼロ終了時の構造化エラー JSON を `stdout` に出し、構成リストの `plugins` 配列を `ADD` 時は正順、`DEL` 時は逆順かつ冪等に連鎖すること、および新規 Linux netns の `lo` 有効化に `loopback`・`host-local` に `ranges` 形式を用いることを一次資料で確認した（https://github.com/containernetworking/cni/blob/main/SPEC.md 、https://github.com/containernetworking/plugins ）。CSI は Identity・Controller・Node の gRPC サービスを定義し、Kubernetes の CSI サイドカー群は Kubernetes API オブジェクトを watch するため再利用できないことを一次資料で確認した（https://github.com/container-storage-interface/spec/blob/master/spec.md ）。また Nomad がサイドカーなしで CSI を直接呼ぶ公開設計では双方向マウント伝播（`rshared`）・ソケット `Probe` 再試行・`NodeGetInfo` トポロジ連携が要点であることを公式文書（https://developer.hashicorp.com/nomad/docs/concepts/storage/csi ）で確認した（Nomad は BSL 1.1 のためコードは一切参照せず Apache-2.0 の CSI 仕様のみからクリーンルームで設計する）。Kubernetes の Pod User Namespaces（`hostUsers: false`）は v1.36 で GA となっていることを確認しているが、初期範囲には含めない。
 
 ## 検討した代替案
 
@@ -46,4 +46,7 @@ CRI を経由すると、独自モデルから `PodSandbox` への変換層と K
 
 - [[0001]]：OCI・CNI・CSI・containerd の再利用（前提 4）と Kubernetes のつらさを引き受けない線引き（前提 5）を定めた前提 ADR。
 - [[0002]]：中核の実装言語を Go に固定した決定であり、containerd の Go クライアントを直接利用する前提。
-- [[0003]]：`kind` 等を差分オラクルにして実装の正しさを検証する方針であり、`lk-node` の状態遷移・マウント比較の根拠。
+- [[0003]]：`kind` 等を差分オラクルにして実装の正しさを検証する方針であり、`lk-node` の状態遷移・マウント比較の根拠（`kind` 差分ハーネス自体は [[0017]] に従い別 ADR で整備する）。
+- [[0015]]：外部作用をシミュレーション用インターフェース経由で隔離する方針を定める。
+- [[0017]]：DRT・保護定理の枠組みと Kubernetes `kind` 差分オラクルの分離を定める。
+- [[0031]]：本決定の初期実現方式（純粋ライフサイクル核 `core/node/lifecycle` と Lean 9 定理・DRT、`nodesim`、`containerd v2.3.7`・Linux `netns`・CNI アダプタ、`cmd/lk-node`）を定める。

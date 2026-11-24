@@ -247,6 +247,106 @@ jobs:
           NAYUTAR_ETCD_BIN: ${{ runner.temp }}/etcd/etcd
         run: go test -race -count=1 -tags etcd ./core/store/... ./core/liveness/ ./core/resource/ ./core/wire/
 
+  node-containerd:
+    name: Direct containerd execution (node)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Vet node package with containerd tag
+        run: go vet -tags containerd ./core/node/...
+
+      - name: Install containerd, runc and CNI plugins
+        env:
+          CONTAINERD_VERSION: 2.3.7
+          CONTAINERD_SHA256: 09a1b669ac6d21e7e24c3c33a9805b48987ba5845e8d88f039c47013a0c0025c
+          RUNC_VERSION: v1.5.2
+          RUNC_SHA256: 599f6f94ff8c5057241eff0d54c3c74f95c34935b6457b33fe545defc61e9488
+          CNI_PLUGINS_VERSION: v1.9.0
+          CNI_PLUGINS_SHA256: 58c03705426e929658f45a851df15a86d06ef680cacbf3f2dc127731ca265c28
+        run: |
+          set -euo pipefail
+          ctrd_archive="containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+            -o "${RUNNER_TEMP}/${ctrd_archive}" \
+            "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/${ctrd_archive}"
+          echo "${CONTAINERD_SHA256}  ${RUNNER_TEMP}/${ctrd_archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/runtime"
+          tar -xzf "${RUNNER_TEMP}/${ctrd_archive}" -C "${RUNNER_TEMP}/runtime"
+
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+            -o "${RUNNER_TEMP}/runtime/bin/runc" \
+            "https://github.com/opencontainers/runc/releases/download/${RUNC_VERSION}/runc.amd64"
+          echo "${RUNC_SHA256}  ${RUNNER_TEMP}/runtime/bin/runc" | sha256sum --check --strict
+          chmod 0755 "${RUNNER_TEMP}/runtime/bin/runc"
+
+          cni_archive="cni-plugins-linux-amd64-${CNI_PLUGINS_VERSION}.tgz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+            -o "${RUNNER_TEMP}/${cni_archive}" \
+            "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/${cni_archive}"
+          echo "${CNI_PLUGINS_SHA256}  ${RUNNER_TEMP}/${cni_archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/cni/bin"
+          tar -xzf "${RUNNER_TEMP}/${cni_archive}" -C "${RUNNER_TEMP}/cni/bin"
+
+          "${RUNNER_TEMP}/runtime/bin/containerd" --version
+          "${RUNNER_TEMP}/runtime/bin/runc" --version
+
+      - name: Run the direct containerd, netns and CNI integration suite with and without race detector
+        run: |
+          set -euo pipefail
+          run_dir="${RUNNER_TEMP}/containerd-run"
+          mkdir -p "${run_dir}/root" "${run_dir}/state"
+          sock="${run_dir}/containerd.sock"
+          sudo env "PATH=${RUNNER_TEMP}/runtime/bin:${PATH}" \
+            "${RUNNER_TEMP}/runtime/bin/containerd" \
+            --root "${run_dir}/root" \
+            --state "${run_dir}/state" \
+            --address "${sock}" >"${run_dir}/containerd.log" 2>&1 &
+          ctrd_pid=$!
+          cleanup() {
+            sudo kill -TERM "${ctrd_pid}" 2>/dev/null
+            wait "${ctrd_pid}" 2>/dev/null
+          }
+          trap 'set +e; cleanup' EXIT
+          ready=0
+          for _ in $(seq 1 50); do
+            if sudo "${RUNNER_TEMP}/runtime/bin/ctr" --address "${sock}" version >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "${ready}" -ne 1 ]; then
+            cat "${run_dir}/containerd.log" >&2
+            exit 1
+          fi
+          sudo env \
+            "PATH=${RUNNER_TEMP}/runtime/bin:${PATH}" \
+            "HOME=${HOME}" \
+            "GOCACHE=${RUNNER_TEMP}/go-build" \
+            "NAYUTAR_CONTAINERD_SOCK=${sock}" \
+            "NAYUTAR_CNI_BIN_DIR=${RUNNER_TEMP}/cni/bin" \
+            go test -count=1 -tags containerd ./core/node/...
+          sudo env \
+            "PATH=${RUNNER_TEMP}/runtime/bin:${PATH}" \
+            "HOME=${HOME}" \
+            "GOCACHE=${RUNNER_TEMP}/go-build" \
+            "NAYUTAR_CONTAINERD_SOCK=${sock}" \
+            "NAYUTAR_CNI_BIN_DIR=${RUNNER_TEMP}/cni/bin" \
+            go test -race -count=1 -tags containerd ./core/node/...
+
   vulncheck:
     name: Vulnerability scan (govulncheck)
     runs-on: ubuntu-24.04
@@ -276,3 +376,6 @@ jobs:
 
       - name: Scan the module and its tests with the drt and etcd build tags
         run: govulncheck -test -tags drt,etcd ./...
+
+      - name: Scan the module and its tests with the containerd build tag
+        run: govulncheck -test -tags drt,etcd,containerd ./...

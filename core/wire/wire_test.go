@@ -234,13 +234,14 @@ type testEnv struct {
 }
 
 type envOpts struct {
-	root         store.Store
-	useTLS       bool
-	cacheCfg     watchcache.Config
-	authFn       func(*http.Request) (refs.Principal, error)
-	authorizer   refs.Authorizer
-	maxBodyBytes int64
-	maxListLimit int
+	root          store.Store
+	useTLS        bool
+	cacheCfg      watchcache.Config
+	authFn        func(*http.Request) (refs.Principal, error)
+	authorizer    refs.Authorizer
+	scopeResolver resource.ScopeResolver
+	maxBodyBytes  int64
+	maxListLimit  int
 }
 
 func startTestEnv(t *testing.T, opts envOpts) *testEnv {
@@ -274,14 +275,15 @@ func startTestEnv(t *testing.T, opts envOpts) *testEnv {
 
 	clk := &fixedClock{t: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
 	h, err := wire.New(wire.Config{
-		Registry:     reg,
-		Caches:       caches,
-		Schemas:      testSchemas(t),
-		Authorizer:   opts.authorizer,
-		Authenticate: opts.authFn,
-		Now:          clk.Now,
-		MaxBodyBytes: opts.maxBodyBytes,
-		MaxListLimit: opts.maxListLimit,
+		Registry:      reg,
+		Caches:        caches,
+		Schemas:       testSchemas(t),
+		Authorizer:    opts.authorizer,
+		ScopeResolver: opts.scopeResolver,
+		Authenticate:  opts.authFn,
+		Now:           clk.Now,
+		MaxBodyBytes:  opts.maxBodyBytes,
+		MaxListLimit:  opts.maxListLimit,
 	})
 	if err != nil {
 		t.Fatalf("wire.New: %v", err)
@@ -426,7 +428,7 @@ func TestSchemasAndCodecs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DecodeError(%s): %v", tc.kind, err)
 		}
-		if *got != *in {
+		if !got.Equal(in) {
 			t.Fatalf("error roundtrip mismatch: got %+v, want %+v", got, in)
 		}
 		if !errors.Is(got, tc.sentinel) {
@@ -520,7 +522,7 @@ func TestSchemasAndCodecs(t *testing.T) {
 		if ev.Target != nil && (got.Target == nil || *got.Target != *ev.Target) {
 			t.Fatalf("WatchEvent[%d] target mismatch: got %+v, want %+v", i, got.Target, ev.Target)
 		}
-		if ev.Error != nil && (got.Error == nil || *got.Error != *ev.Error) {
+		if ev.Error != nil && (got.Error == nil || !got.Error.Equal(ev.Error)) {
 			t.Fatalf("WatchEvent[%d] error mismatch: got %+v, want %+v", i, got.Error, ev.Error)
 		}
 	}

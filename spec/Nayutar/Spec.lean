@@ -6,6 +6,8 @@ import Nayutar.Envelope
 import Nayutar.Refs
 import Nayutar.OrderedSet
 import Nayutar.Patch
+import Nayutar.Ownership
+import Nayutar.Node
 
 namespace Nayutar
 

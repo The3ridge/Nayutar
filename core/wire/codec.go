@@ -9,6 +9,7 @@ import (
 	"github.com/Kaikei-e/LKAL"
 	"github.com/Kaikei-e/Nayutar/core/resource"
 	"github.com/Kaikei-e/Nayutar/core/resource/envelope"
+	"github.com/Kaikei-e/Nayutar/core/resource/ownership"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 )
@@ -18,6 +19,8 @@ const (
 	MediaTypeResource = "application/vnd.nayutar.lkal+json"
 	// MediaTypePatch is the HTTP media type for LKAL-JSON ordered-set patch payloads.
 	MediaTypePatch = "application/vnd.nayutar.lkal-patch+json"
+	// HeaderOwnerRevision carries the ownership key's store mod revision on ownership write responses.
+	HeaderOwnerRevision = "Nayutar-Owner-Revision"
 )
 
 // WatchEventType identifies the kind of event delivered on a wire watch stream.
@@ -441,4 +444,230 @@ func findEnumField(rec lkal.Record, key string) (string, bool) {
 	}
 	e, ok := v.(lkal.Enum)
 	return string(e), ok
+}
+
+// EncodeExplain serializes exp into compact single-line LKAL-JSON conforming to explain.schema.lkal.
+func EncodeExplain(exp ownership.Explanation) ([]byte, error) {
+	if exp.Revision < 1 {
+		return nil, fmt.Errorf("wire: explain revision %d must be >= 1", exp.Revision)
+	}
+	if exp.OwnerRevision < 1 {
+		return nil, fmt.Errorf("wire: explain ownerRevision %d must be >= 1", exp.OwnerRevision)
+	}
+	if err := ownership.ValidateActorID(exp.DefaultOwner); err != nil {
+		return nil, fmt.Errorf("wire: explain defaultOwner: %w", err)
+	}
+	if exp.Expect == "" {
+		return nil, errors.New("wire: explain expect must not be empty")
+	}
+
+	sorted := slices.Clone(exp.Leaves)
+	slices.SortFunc(sorted, func(a, b ownership.LeafExplanation) int {
+		return a.Path.Compare(b.Path)
+	})
+	leafFields := make([]lkal.Field, 0, len(sorted))
+	seen := make(map[string]struct{}, len(sorted))
+	for _, lf := range sorted {
+		if err := ownership.ValidateEntranceSpecPath(lf.Path); err != nil {
+			return nil, fmt.Errorf("wire: explain leaf path: %w", err)
+		}
+		key := lf.Path.String()
+		if _, dup := seen[key]; dup {
+			return nil, fmt.Errorf("wire: duplicate explain leaf %q", key)
+		}
+		seen[key] = struct{}{}
+		if !lf.State.IsValid() {
+			return nil, fmt.Errorf("wire: explain leaf %q invalid state %d", key, lf.State)
+		}
+		if lf.Expect == "" {
+			return nil, fmt.Errorf("wire: explain leaf %q missing expect", key)
+		}
+		recFields := make([]lkal.Field, 0, 4)
+		recFields = append(recFields, lkal.Field{Key: "state", Value: lkal.Enum(lf.State.String())})
+		if lf.State == ownership.StateOwned {
+			if err := ownership.ValidateActorID(lf.Owner); err != nil {
+				return nil, fmt.Errorf("wire: explain leaf %q owner: %w", key, err)
+			}
+			if !lf.Origin.IsValid() {
+				return nil, fmt.Errorf("wire: explain leaf %q missing valid origin", key)
+			}
+			recFields = append(recFields,
+				lkal.Field{Key: "owner", Value: lkal.String(lf.Owner)},
+				lkal.Field{Key: "origin", Value: lkal.Enum(lf.Origin.String())},
+			)
+		} else if lf.Owner != "" || lf.Origin != 0 {
+			return nil, fmt.Errorf("wire: explain leaf %q (%s) must not carry owner or origin", key, lf.State)
+		}
+		recFields = append(recFields, lkal.Field{Key: "expect", Value: lkal.String(lf.Expect)})
+		leafFields = append(leafFields, lkal.Field{Key: key, Value: lkal.Record{Fields: recFields}})
+	}
+
+	fields := []lkal.Field{
+		{Key: "revision", Value: lkal.Int(exp.Revision)},
+		{Key: "ownerRevision", Value: lkal.Int(exp.OwnerRevision)},
+		{Key: "expect", Value: lkal.String(exp.Expect)},
+		{Key: "defaultOwner", Value: lkal.String(exp.DefaultOwner)},
+		{Key: "leaves", Value: lkal.Record{Fields: leafFields}},
+	}
+	return encodeTopFields(fields, explainSchema)
+}
+
+// DecodeExplain parses, schema-validates, and checks invariants on an ownership explain payload.
+func DecodeExplain(data []byte) (ownership.Explanation, error) {
+	f, err := lkal.FromJSON(data)
+	if err != nil {
+		return ownership.Explanation{}, err
+	}
+	if err := explainSchema.Validate(f); err != nil {
+		return ownership.Explanation{}, err
+	}
+	top := f.Data()
+	rev, ok := findIntField(top, "revision")
+	if !ok || rev < 1 {
+		return ownership.Explanation{}, errors.New("wire: invalid explain revision")
+	}
+	ownerRev, ok := findIntField(top, "ownerRevision")
+	if !ok || ownerRev < 1 {
+		return ownership.Explanation{}, errors.New("wire: invalid explain ownerRevision")
+	}
+	docExpect, ok := findStringField(top, "expect")
+	if !ok || docExpect == "" {
+		return ownership.Explanation{}, errors.New("wire: missing explain expect")
+	}
+	defOwnerStr, ok := findStringField(top, "defaultOwner")
+	if !ok {
+		return ownership.Explanation{}, errors.New("wire: missing explain defaultOwner")
+	}
+	defOwner := ownership.ActorID(defOwnerStr)
+	if err := ownership.ValidateActorID(defOwner); err != nil {
+		return ownership.Explanation{}, fmt.Errorf("wire: invalid explain defaultOwner: %w", err)
+	}
+	leavesRec, ok := findRecordField(top, "leaves")
+	if !ok {
+		return ownership.Explanation{}, errors.New("wire: missing explain leaves")
+	}
+
+	leaves := make([]ownership.LeafExplanation, 0, len(leavesRec.Fields))
+	for _, fld := range leavesRec.Fields {
+		p, err := ownership.ParsePath(fld.Key)
+		if err != nil {
+			return ownership.Explanation{}, fmt.Errorf("wire: explain leaf key %q: %w", fld.Key, err)
+		}
+		if err := ownership.ValidateEntranceSpecPath(p); err != nil || p.String() != fld.Key {
+			return ownership.Explanation{}, fmt.Errorf("wire: non-canonical explain leaf path %q", fld.Key)
+		}
+		lrec, ok := fld.Value.(lkal.Record)
+		if !ok {
+			return ownership.Explanation{}, fmt.Errorf("wire: explain leaf %q must be a record", fld.Key)
+		}
+		stateStr, ok := findEnumField(lrec, "state")
+		if !ok {
+			return ownership.Explanation{}, fmt.Errorf("wire: explain leaf %q missing state", fld.Key)
+		}
+		var st ownership.LeafState
+		switch stateStr {
+		case "owned":
+			st = ownership.StateOwned
+		case "unowned":
+			st = ownership.StateUnowned
+		case "defaulted":
+			st = ownership.StateDefaulted
+		default:
+			return ownership.Explanation{}, fmt.Errorf("wire: explain leaf %q invalid state %q", fld.Key, stateStr)
+		}
+		ownerStr, hasOwner := findStringField(lrec, "owner")
+		originStr, hasOrigin := findEnumField(lrec, "origin")
+		expectStr, hasExpect := findStringField(lrec, "expect")
+		if !hasExpect || expectStr == "" {
+			return ownership.Explanation{}, fmt.Errorf("wire: explain leaf %q missing expect", fld.Key)
+		}
+		var (
+			owner  ownership.ActorID
+			origin ownership.Origin
+		)
+		if st == ownership.StateOwned {
+			if !hasOwner || !hasOrigin {
+				return ownership.Explanation{}, fmt.Errorf("wire: owned explain leaf %q requires owner and origin", fld.Key)
+			}
+			owner = ownership.ActorID(ownerStr)
+			if err := ownership.ValidateActorID(owner); err != nil {
+				return ownership.Explanation{}, fmt.Errorf("wire: explain leaf %q owner: %w", fld.Key, err)
+			}
+			switch originStr {
+			case "created":
+				origin = ownership.OriginCreated
+			case "modified":
+				origin = ownership.OriginModified
+			default:
+				return ownership.Explanation{}, fmt.Errorf("wire: explain leaf %q invalid origin %q", fld.Key, originStr)
+			}
+		} else if hasOwner || hasOrigin {
+			return ownership.Explanation{}, fmt.Errorf("wire: %s explain leaf %q must not carry owner or origin", stateStr, fld.Key)
+		}
+		leaves = append(leaves, ownership.LeafExplanation{
+			Path:   p,
+			State:  st,
+			Owner:  owner,
+			Origin: origin,
+			Expect: expectStr,
+		})
+	}
+	slices.SortFunc(leaves, func(a, b ownership.LeafExplanation) int {
+		return a.Path.Compare(b.Path)
+	})
+	return ownership.Explanation{
+		Revision:      rev,
+		OwnerRevision: ownerRev,
+		Expect:        docExpect,
+		DefaultOwner:  defOwner,
+		Leaves:        leaves,
+	}, nil
+}
+
+// EncodeResolveRequest serializes opts into compact single-line LKAL-JSON conforming to resolve.schema.lkal.
+func EncodeResolveRequest(opts resource.ResolveOptions) ([]byte, error) {
+	if opts.Path == "" {
+		return nil, errors.New("wire: resolve path must not be empty")
+	}
+	if opts.Expect == "" {
+		return nil, errors.New("wire: resolve expect must not be empty")
+	}
+	if opts.ExpectedOwnerRev < 0 {
+		return nil, fmt.Errorf("wire: resolve ownerRevision %d must be >= 0", opts.ExpectedOwnerRev)
+	}
+	fields := []lkal.Field{
+		{Key: "path", Value: lkal.String(opts.Path)},
+		{Key: "expect", Value: lkal.String(opts.Expect)},
+		{Key: "ownerRevision", Value: lkal.Int(opts.ExpectedOwnerRev)},
+	}
+	return encodeTopFields(fields, resolveSchema)
+}
+
+// DecodeResolveRequest parses and validates an adopt/release request payload against resolve.schema.lkal.
+func DecodeResolveRequest(data []byte) (resource.ResolveOptions, error) {
+	f, err := lkal.FromJSON(data)
+	if err != nil {
+		return resource.ResolveOptions{}, err
+	}
+	if err := resolveSchema.Validate(f); err != nil {
+		return resource.ResolveOptions{}, err
+	}
+	top := f.Data()
+	pathStr, ok := findStringField(top, "path")
+	if !ok || pathStr == "" {
+		return resource.ResolveOptions{}, errors.New("wire: missing resolve path")
+	}
+	expectStr, ok := findStringField(top, "expect")
+	if !ok || expectStr == "" {
+		return resource.ResolveOptions{}, errors.New("wire: missing resolve expect")
+	}
+	ownerRev, ok := findIntField(top, "ownerRevision")
+	if !ok || ownerRev < 0 {
+		return resource.ResolveOptions{}, errors.New("wire: invalid resolve ownerRevision")
+	}
+	return resource.ResolveOptions{
+		Path:             pathStr,
+		Expect:           expectStr,
+		ExpectedOwnerRev: store.Rev(ownerRev),
+	}, nil
 }

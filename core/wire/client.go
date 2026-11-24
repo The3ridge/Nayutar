@@ -16,6 +16,7 @@ import (
 	"github.com/Kaikei-e/LKAL"
 	"github.com/Kaikei-e/Nayutar/core/resource"
 	"github.com/Kaikei-e/Nayutar/core/resource/envelope"
+	"github.com/Kaikei-e/Nayutar/core/resource/ownership"
 	"github.com/Kaikei-e/Nayutar/core/resource/patch"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
@@ -348,6 +349,143 @@ func (c *Client) Delete(ctx context.Context, tenantName string, obj keyspace.Obj
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1))
 	return nil
+}
+
+// Apply declaratively creates or updates an object via PUT /t/{tenant}/o/{group}/{kind}/{name}/apply.
+func (c *Client) Apply(ctx context.Context, tenantName string, obj keyspace.Object, declaration lkal.Record, opts resource.ApplyOptions) (resource.ApplyResult, error) {
+	return c.doApplyOrPrune(ctx, http.MethodPut, objectPath(tenantName, obj)+"/apply", declaration, opts, true)
+}
+
+// Prune conservatively deletes retired created leaves via POST /t/{tenant}/o/{group}/{kind}/{name}/prune.
+func (c *Client) Prune(ctx context.Context, tenantName string, obj keyspace.Object, declaration lkal.Record, opts resource.ApplyOptions) (resource.ApplyResult, error) {
+	return c.doApplyOrPrune(ctx, http.MethodPost, objectPath(tenantName, obj)+"/prune", declaration, opts, false)
+}
+
+func (c *Client) doApplyOrPrune(ctx context.Context, method, path string, declaration lkal.Record, opts resource.ApplyOptions, allowCreated bool) (resource.ApplyResult, error) {
+	if opts.ExpectedOwnerRev < 0 {
+		return resource.ApplyResult{}, &Error{
+			Kind:    KindBadRequest,
+			Status:  http.StatusBadRequest,
+			Code:    ownership.CodeInvalidInput,
+			Path:    "ownerRev",
+			Message: "ownerRev must be >= 0",
+		}
+	}
+	body, err := resource.Encode(declaration)
+	if err != nil {
+		return resource.ApplyResult{}, err
+	}
+	q := url.Values{}
+	if opts.Expect != "" {
+		q.Set("expect", opts.Expect)
+	}
+	if opts.ExpectedOwnerRev > 0 {
+		q.Set("ownerRev", strconv.FormatInt(int64(opts.ExpectedOwnerRev), 10))
+	}
+	req, err := c.newRequest(ctx, method, path, q, body, MediaTypeResource)
+	if err != nil {
+		return resource.ApplyResult{}, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return resource.ApplyResult{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	created := allowCreated && resp.StatusCode == http.StatusCreated
+	if resp.StatusCode != http.StatusOK && !created {
+		return resource.ApplyResult{}, c.decodeErrorResponse(resp)
+	}
+	rec, err := c.decodeResourceResponse(resp)
+	if err != nil {
+		return resource.ApplyResult{}, err
+	}
+	ownerRev, err := parseOwnerRevHeader(resp.Header.Get(HeaderOwnerRevision))
+	if err != nil {
+		return resource.ApplyResult{}, err
+	}
+	return resource.ApplyResult{
+		Object:        rec,
+		OwnerRevision: ownerRev,
+		Created:       created,
+	}, nil
+}
+
+// Explain inspects ownership state and condition tokens via GET /t/{tenant}/o/{group}/{kind}/{name}/explain.
+func (c *Client) Explain(ctx context.Context, tenantName string, obj keyspace.Object, atRev store.Rev) (ownership.Explanation, error) {
+	if atRev < 0 {
+		return ownership.Explanation{}, &Error{
+			Kind:    KindBadRequest,
+			Status:  http.StatusBadRequest,
+			Path:    "atRev",
+			Message: "atRev must be >= 0",
+		}
+	}
+	var q url.Values
+	if atRev > 0 {
+		q = url.Values{"atRev": {strconv.FormatInt(int64(atRev), 10)}}
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, objectPath(tenantName, obj)+"/explain", q, nil, "")
+	if err != nil {
+		return ownership.Explanation{}, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return ownership.Explanation{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ownership.Explanation{}, c.decodeErrorResponse(resp)
+	}
+	data, err := c.readResponseBody(resp)
+	if err != nil {
+		return ownership.Explanation{}, err
+	}
+	return DecodeExplain(data)
+}
+
+// Adopt explicitly claims a leaf path via POST /t/{tenant}/o/{group}/{kind}/{name}/adopt.
+func (c *Client) Adopt(ctx context.Context, tenantName string, obj keyspace.Object, opts resource.ResolveOptions) (ownership.Explanation, error) {
+	return c.doResolve(ctx, objectPath(tenantName, obj)+"/adopt", opts)
+}
+
+// Release explicitly releases a self-owned leaf path via POST /t/{tenant}/o/{group}/{kind}/{name}/release.
+func (c *Client) Release(ctx context.Context, tenantName string, obj keyspace.Object, opts resource.ResolveOptions) (ownership.Explanation, error) {
+	return c.doResolve(ctx, objectPath(tenantName, obj)+"/release", opts)
+}
+
+func (c *Client) doResolve(ctx context.Context, path string, opts resource.ResolveOptions) (ownership.Explanation, error) {
+	body, err := EncodeResolveRequest(opts)
+	if err != nil {
+		return ownership.Explanation{}, err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, path, nil, body, MediaTypeResource)
+	if err != nil {
+		return ownership.Explanation{}, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return ownership.Explanation{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ownership.Explanation{}, c.decodeErrorResponse(resp)
+	}
+	data, err := c.readResponseBody(resp)
+	if err != nil {
+		return ownership.Explanation{}, err
+	}
+	return DecodeExplain(data)
+}
+
+func parseOwnerRevHeader(raw string) (store.Rev, error) {
+	if raw == "" {
+		return 0, errors.New("wire: missing Nayutar-Owner-Revision header")
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("wire: invalid Nayutar-Owner-Revision header %q", raw)
+	}
+	return store.Rev(n), nil
 }
 
 // Watch opens a streaming NDJSON watch via GET /t/{tenant}/o/{group}/{kind}?watch=true.

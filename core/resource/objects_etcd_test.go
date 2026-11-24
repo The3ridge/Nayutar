@@ -74,6 +74,7 @@ func TestEtcdObjects(t *testing.T) {
 	}
 	checkObjectsCore(t, newTenantStore)
 	checkObjectsPatchAndList(t, newTenantStore)
+	checkObjectsOwnership(t, newTenantStore)
 	checkObjectsRefsSuite(t, isolatedRoot)
 	checkObjectsPatchRefs(t, isolatedRoot)
 }

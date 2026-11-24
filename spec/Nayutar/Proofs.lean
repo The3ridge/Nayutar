@@ -5,3 +5,5 @@ import Nayutar.Proofs.Envelope
 import Nayutar.Proofs.Refs
 import Nayutar.Proofs.OrderedSet
 import Nayutar.Proofs.Patch
+import Nayutar.Proofs.Ownership
+import Nayutar.Proofs.Node

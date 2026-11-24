@@ -329,6 +329,9 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 		"core/drt/liveness_drt_test.go":                  "//go:build drt",
 		"core/drt/orderedset_drt_test.go":                "//go:build drt",
 		"core/drt/patch_drt_test.go":                     "//go:build drt",
+		"core/drt/ownership_drt_test.go":                 "//go:build drt",
+		"core/drt/node_drt_test.go":                      "//go:build drt",
+		"core/node/containerd_linux_test.go":             "//go:build linux && containerd",
 		"core/drt/store_etcd_drt_test.go":                "//go:build drt && etcd",
 	} {
 		firstLine, _, _ := strings.Cut(readRepoFile(t, rel), "\n")
@@ -381,6 +384,18 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 			"func TestPatchCasesReachEveryOutcome(",
 			"func TestPatchComparisonDetectsEveryFieldMutation(",
 			"func TestPatchDRTCatchesBrokenImplementations(",
+		},
+		"core/drt/ownership_drt_test.go": {
+			"func TestOwnershipMatchesLeanModel(",
+			"func TestOwnershipCasesReachEveryOutcome(",
+			"func TestOwnershipComparisonDetectsEveryFieldMutation(",
+			"func TestOwnershipDRTCatchesBrokenImplementations(",
+		},
+		"core/drt/node_drt_test.go": {
+			"func TestNodeMatchesLeanModel(",
+			"func TestNodeCasesReachEveryOutcome(",
+			"func TestNodeComparisonDetectsEveryFieldMutation(",
+			"func TestNodeDRTCatchesBrokenImplementations(",
 		},
 	} {
 		body := readRepoFile(t, rel)

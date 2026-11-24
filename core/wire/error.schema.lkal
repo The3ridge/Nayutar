@@ -2,8 +2,34 @@
 
 lkal-schema = "0.2"
 id = "nayutar:core/wire-error/0.1"
-version = "0.1.0"
+version = "0.2.0"
 doc = "Structured wire error response schema."
+
+def "diagnostic" {
+  type = .record
+  field "order" {
+    type = .int
+    required = true
+  }
+  field "code" {
+    type = .string
+    required = true
+    pattern = "K(101|102|201|202|203|204|206|301|302|401|502|602|603|604)"
+  }
+  field "path" {
+    type = .string
+    min-length = 1
+  }
+  field "reason" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "nextAction" {
+    type = .string
+    min-length = 1
+  }
+}
 
 def "error" {
   type = .record
@@ -18,6 +44,10 @@ def "error" {
     min = 400
     max = 599
   }
+  field "code" {
+    type = .string
+    pattern = "K(101|102|201|202|203|204|206|301|302|401|502|602|603|604)"
+  }
   field "path" {
     type = .string
     min-length = 1
@@ -26,6 +56,11 @@ def "error" {
     type = .string
     required = true
     min-length = 1
+  }
+  field "diagnostics" {
+    type = .map
+    unique-by = ["order"]
+    value { use = &def/diagnostic }
   }
 }
 

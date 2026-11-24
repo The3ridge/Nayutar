@@ -32,7 +32,7 @@ func TestCoreDoesNotAddRustModelCheckerOrProofToolchains(t *testing.T) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", ".lake":
+			case ".git", ".lake", ".serena":
 				return filepath.SkipDir
 			}
 			if rel == "docs" || filepath.ToSlash(rel) == agentWorktrees {
@@ -88,7 +88,7 @@ func TestHumanFacingSurfaceHasNoYAML(t *testing.T) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", ".lake":
+			case ".git", ".lake", ".serena":
 				return filepath.SkipDir
 			}
 			if rel, err := filepath.Rel(root, path); err == nil && filepath.ToSlash(rel) == agentWorktrees {

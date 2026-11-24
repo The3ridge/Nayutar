@@ -4,11 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strconv"
 	"unicode/utf8"
 
 	"github.com/Kaikei-e/LKAL"
 	"github.com/Kaikei-e/Nayutar/core/resource"
 	"github.com/Kaikei-e/Nayutar/core/resource/envelope"
+	"github.com/Kaikei-e/Nayutar/core/resource/orderedset"
+	"github.com/Kaikei-e/Nayutar/core/resource/ownership"
 	"github.com/Kaikei-e/Nayutar/core/resource/patch"
 	"github.com/Kaikei-e/Nayutar/core/resource/refs"
 	"github.com/Kaikei-e/Nayutar/core/store"
@@ -137,12 +141,35 @@ func kindForStatus(status int) ErrorKind {
 	}
 }
 
+// Diagnostic is one structured kisage diagnostic entry carried inside Error.Diagnostics.
+type Diagnostic struct {
+	Code       ownership.Code
+	Path       string
+	Reason     string
+	NextAction string
+}
+
 // Error is the structured wire error returned by HTTP error responses and terminal watch error events.
 type Error struct {
-	Kind    ErrorKind
-	Status  int
-	Path    string
-	Message string
+	Kind        ErrorKind
+	Status      int
+	Code        ownership.Code
+	Path        string
+	Message     string
+	Diagnostics []Diagnostic
+}
+
+// Equal reports whether e and other carry identical fields and diagnostics.
+func (e *Error) Equal(other *Error) bool {
+	if e == nil || other == nil {
+		return e == other
+	}
+	return e.Kind == other.Kind &&
+		e.Status == other.Status &&
+		e.Code == other.Code &&
+		e.Path == other.Path &&
+		e.Message == other.Message &&
+		slices.Equal(e.Diagnostics, other.Diagnostics)
 }
 
 // Error formats the wire error for diagnostics.
@@ -151,6 +178,9 @@ func (e *Error) Error() string {
 		return "<nil>"
 	}
 	msg := fmt.Sprintf("wire: %s (%d)", e.Kind, e.Status)
+	if e.Code != "" {
+		msg += " [" + string(e.Code) + "]"
+	}
 	if e.Path != "" {
 		msg += ": " + e.Path
 	}
@@ -178,18 +208,53 @@ func errorToRecord(e *Error) (lkal.Record, error) {
 	if e.Status < 400 || e.Status > 599 {
 		return lkal.Record{}, fmt.Errorf("wire: error status %d must be in 400..599", e.Status)
 	}
+	if e.Code != "" && !e.Code.IsValid() {
+		return lkal.Record{}, fmt.Errorf("wire: invalid error code %q", e.Code)
+	}
 	if e.Message == "" {
 		return lkal.Record{}, errors.New("wire: error message must not be empty")
 	}
-	fields := make([]lkal.Field, 0, 4)
+	fields := make([]lkal.Field, 0, 6)
 	fields = append(fields,
 		lkal.Field{Key: "kind", Value: lkal.Enum(e.Kind)},
 		lkal.Field{Key: "status", Value: lkal.Int(e.Status)},
 	)
+	if e.Code != "" {
+		fields = append(fields, lkal.Field{Key: "code", Value: lkal.String(e.Code)})
+	}
 	if e.Path != "" {
 		fields = append(fields, lkal.Field{Key: "path", Value: lkal.String(e.Path)})
 	}
 	fields = append(fields, lkal.Field{Key: "message", Value: lkal.String(e.Message)})
+	if len(e.Diagnostics) > 0 {
+		items := make([]orderedset.Item, len(e.Diagnostics))
+		for i, d := range e.Diagnostics {
+			if !d.Code.IsValid() {
+				return lkal.Record{}, fmt.Errorf("wire: invalid diagnostic code %q", d.Code)
+			}
+			if d.Reason == "" {
+				return lkal.Record{}, errors.New("wire: diagnostic reason must not be empty")
+			}
+			df := make([]lkal.Field, 0, 4)
+			df = append(df, lkal.Field{Key: "code", Value: lkal.String(d.Code)})
+			if d.Path != "" {
+				df = append(df, lkal.Field{Key: "path", Value: lkal.String(d.Path)})
+			}
+			df = append(df, lkal.Field{Key: "reason", Value: lkal.String(d.Reason)})
+			if d.NextAction != "" {
+				df = append(df, lkal.Field{Key: "nextAction", Value: lkal.String(d.NextAction)})
+			}
+			items[i] = orderedset.Item{
+				Key:   strconv.Itoa(i),
+				Value: lkal.Record{Fields: df},
+			}
+		}
+		diagRec, err := orderedset.FromItems(items)
+		if err != nil {
+			return lkal.Record{}, fmt.Errorf("wire: encode diagnostics: %w", err)
+		}
+		fields = append(fields, lkal.Field{Key: "diagnostics", Value: diagRec})
+	}
 	return lkal.Record{Fields: fields}, nil
 }
 
@@ -209,6 +274,16 @@ func errorFromRecord(rec lkal.Record) (*Error, error) {
 				return nil, errors.New("wire: error.status must be an int")
 			}
 			out.Status = int(n)
+		case "code":
+			s, ok := fld.Value.(lkal.String)
+			if !ok {
+				return nil, errors.New("wire: error.code must be a string")
+			}
+			c := ownership.Code(s)
+			if !c.IsValid() {
+				return nil, fmt.Errorf("wire: unknown error.code %q", string(s))
+			}
+			out.Code = c
 		case "path":
 			s, ok := fld.Value.(lkal.String)
 			if !ok {
@@ -221,6 +296,16 @@ func errorFromRecord(rec lkal.Record) (*Error, error) {
 				return nil, errors.New("wire: error.message must be a string")
 			}
 			out.Message = string(s)
+		case "diagnostics":
+			dRec, ok := fld.Value.(lkal.Record)
+			if !ok {
+				return nil, errors.New("wire: error.diagnostics must be a record")
+			}
+			diags, err := diagnosticsFromRecord(dRec)
+			if err != nil {
+				return nil, err
+			}
+			out.Diagnostics = diags
 		default:
 			return nil, fmt.Errorf("wire: unexpected error field %q", fld.Key)
 		}
@@ -235,6 +320,59 @@ func errorFromRecord(rec lkal.Record) (*Error, error) {
 		return nil, errors.New("wire: missing error message")
 	}
 	return &out, nil
+}
+
+func diagnosticsFromRecord(rec lkal.Record) ([]Diagnostic, error) {
+	entries, err := orderedset.Entries(rec)
+	if err != nil {
+		return nil, fmt.Errorf("wire: invalid diagnostics ordered set: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	out := make([]Diagnostic, 0, len(entries))
+	for _, entry := range entries {
+		var d Diagnostic
+		for _, f := range entry.Value.Fields {
+			switch f.Key {
+			case "code":
+				s, ok := f.Value.(lkal.String)
+				if !ok {
+					return nil, errors.New("wire: diagnostic.code must be a string")
+				}
+				c := ownership.Code(s)
+				if !c.IsValid() {
+					return nil, fmt.Errorf("wire: invalid diagnostic.code %q", string(s))
+				}
+				d.Code = c
+			case "path":
+				s, ok := f.Value.(lkal.String)
+				if !ok {
+					return nil, errors.New("wire: diagnostic.path must be a string")
+				}
+				d.Path = string(s)
+			case "reason":
+				s, ok := f.Value.(lkal.String)
+				if !ok {
+					return nil, errors.New("wire: diagnostic.reason must be a string")
+				}
+				d.Reason = string(s)
+			case "nextAction":
+				s, ok := f.Value.(lkal.String)
+				if !ok {
+					return nil, errors.New("wire: diagnostic.nextAction must be a string")
+				}
+				d.NextAction = string(s)
+			default:
+				return nil, fmt.Errorf("wire: unexpected diagnostic field %q", f.Key)
+			}
+		}
+		if !d.Code.IsValid() || d.Reason == "" {
+			return nil, errors.New("wire: diagnostic requires valid code and reason")
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 // EncodeError serializes e into compact single-line LKAL-JSON conforming to error.schema.lkal.
@@ -281,6 +419,9 @@ func sanitizeWireError(e *Error) *Error {
 	if !cp.Kind.valid() {
 		return internalWireError()
 	}
+	if cp.Code != "" && !cp.Code.IsValid() {
+		cp.Code = ""
+	}
 	if !utf8.ValidString(cp.Path) {
 		cp.Path = ""
 	}
@@ -290,6 +431,22 @@ func sanitizeWireError(e *Error) *Error {
 			cp.Message = string(cp.Kind)
 		}
 	}
+	if len(cp.Diagnostics) > 0 {
+		clean := make([]Diagnostic, 0, len(cp.Diagnostics))
+		for _, d := range cp.Diagnostics {
+			if !d.Code.IsValid() || d.Reason == "" || !utf8.ValidString(d.Reason) {
+				continue
+			}
+			if !utf8.ValidString(d.Path) {
+				d.Path = ""
+			}
+			if !utf8.ValidString(d.NextAction) {
+				d.NextAction = ""
+			}
+			clean = append(clean, d)
+		}
+		cp.Diagnostics = clean
+	}
 	return &cp
 }
 
@@ -298,6 +455,29 @@ func nonEmpty(s, fallback string) string {
 		return s
 	}
 	return fallback
+}
+
+func toWireDiagnostics(in []ownership.Diagnostic) []Diagnostic {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Diagnostic, 0, len(in))
+	for _, d := range in {
+		if !d.Code.IsValid() || d.Reason == "" {
+			continue
+		}
+		pathStr := ""
+		if len(d.Path) > 0 {
+			pathStr = d.Path.String()
+		}
+		out = append(out, Diagnostic{
+			Code:       d.Code,
+			Path:       pathStr,
+			Reason:     d.Reason,
+			NextAction: d.NextAction,
+		})
+	}
+	return out
 }
 
 func mapBackendError(err error) *Error {
@@ -314,6 +494,57 @@ func mapBackendError(err error) *Error {
 			Kind:    KindTooLarge,
 			Status:  http.StatusRequestEntityTooLarge,
 			Message: "request body exceeds maximum allowed size",
+		}
+	}
+	var oe *ownership.Error
+	if errors.As(err, &oe) {
+		diags := toWireDiagnostics(oe.Diagnostics)
+		switch oe.Code {
+		case ownership.CodeInvalidInput, ownership.CodeEmptyRecordNotSupported:
+			return &Error{
+				Kind:        KindBadRequest,
+				Status:      http.StatusBadRequest,
+				Code:        oe.Code,
+				Path:        oe.Path,
+				Message:     nonEmpty(oe.Detail, "invalid ownership input"),
+				Diagnostics: diags,
+			}
+		case ownership.CodePolicyDenied:
+			return &Error{
+				Kind:        KindForbidden,
+				Status:      http.StatusForbidden,
+				Code:        oe.Code,
+				Path:        oe.Path,
+				Message:     nonEmpty(oe.Detail, "policy denied"),
+				Diagnostics: diags,
+			}
+		case ownership.CodeOwnershipConflict,
+			ownership.CodeStructureConflict,
+			ownership.CodeExternalDrift,
+			ownership.CodeMigrationRequired,
+			ownership.CodeUnownedValueConflict:
+			return &Error{
+				Kind:        KindConflict,
+				Status:      http.StatusConflict,
+				Code:        oe.Code,
+				Path:        oe.Path,
+				Message:     nonEmpty(oe.Detail, "ownership conflict"),
+				Diagnostics: diags,
+			}
+		case ownership.CodeIndeterminateOutcome:
+			return &Error{
+				Kind:    KindUnavailable,
+				Status:  http.StatusServiceUnavailable,
+				Code:    oe.Code,
+				Message: "indeterminate transaction outcome",
+				Diagnostics: []Diagnostic{{
+					Code:       ownership.CodeIndeterminateOutcome,
+					Reason:     "indeterminate transaction outcome",
+					NextAction: "re-read object and ownership state via explain before retrying",
+				}},
+			}
+		default:
+			return internalWireError()
 		}
 	}
 	var pe *patch.Error

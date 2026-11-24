@@ -1,6 +1,6 @@
 ---
 title: 葉パス所有権を独立キーに分離し本体と同一トランザクションの CAS で更新する
-status: proposed
+status: accepted
 date: 2026-11-17
 depends-on: ["0004", "0006"]
 ---
@@ -27,7 +27,7 @@ depends-on: ["0004", "0006"]
 
 ## 根拠（調査結果・出典）
 
-- **kisage の検証到達点（kisage の `README.md`、`docs/verification-status.md`）**：kisage（`https://github.com/Kaikei-e/kisage`）v0.1.2（2026-10-30、Apache-2.0、Go 1.27.3、Lean v4.35.0）では、`Kisage/Theorems.lean` が純粋関数 `Plan` の安全性 11 性質（19 定理）を `sorry` なしで証明し、`kisage-drt` が 1,728 ケースを Go 実装と比較していることを確認した。`Plan` の 11 性質は純粋計画関数に関するものであり CAS 版でも引き継げる見込みだが、現時点では期待にとどまり未確認である。
+- **kisage の検証到達点と CAS 版での確認（kisage の `README.md`、`docs/verification-status.md`、[[0030]]）**：kisage（`https://github.com/Kaikei-e/kisage`）v0.1.2（2026-10-30、Apache-2.0、Go 1.27.3、Lean v4.35.0）では、`Kisage/Theorems.lean` が純粋関数 `Plan` の安全性 11 性質（19 定理）を `sorry` なしで証明し、`kisage-drt` が 1,728 ケースを Go 実装と比較していることを確認した。さらに [[0030]] において `spec/Nayutar/Ownership.lean` と `spec/Nayutar/Proofs/Ownership.lean` に複数パス・単一 CAS `Txn` 版の計画・圧縮トライ・プロトコルモデルを構築し、Plan の安全性性質と CAS プロトコル不変条件（16 定理）が `sorry` なしで成立し `nayutar-drt ownership` で Go 実装と一致することを確認した。
 - **プロトコルモデル再構築の必要性（kisage の `Kisage/Protocol.lean`、kisage の ADR 0004）**：`ProtocolState.storeEntry : Option OwnerEntry` は他 Actor の予約を入力として受け取る単一パス射影であり、複数パス・複数テナントのストア全体はモデル化されていないことを確認した。`ProtocolInvariant` の 9 項目は原子保存・条件付き適用・2 段の排他ロックを信頼境界に置いて多段階遷移を保証するものである。単一 CAS `Txn` へ移すと Intent 永続化・適用後契約検証・`stabilize`・`recover` が縮退または消滅するため、行単位の再証明ではなくプロトコルモデルの書き直しが必要となる。
 - **ESR と kisage 側の段階（kisage の `docs/verification-status.md`、kisage の ADR 0005）**：kisage でも ESR 本体は未証明であり、単一パス上の有限収束と候補ランク関数のみが形式化されていることを確認した（ESR 本体は kisage の ADR 0005 Phase 5）。また kisage の ADR 0001〜0005 は全件 `proposed` であり、同文書自身もテスト通過を Phase 0–2 の完了とみなさないと明記していることを確認した。
 - **独立キーと単一 CAS `Txn`**：etcd v3 の `Txn` は同一トランザクション内で複数キーの `mod_revision` を比較できることを公式仕様（https://etcd.io/docs/v3.5/learning/api/ ）で確認した。所有権を `/t/<tenant>/own/...` へ分離することで、本体読み取りと watch 配信から所有権メタデータを切り離しつつ、本体・所有権・[[0010]] の逆参照索引の整合性を 1 回の `Txn` で維持できる。
@@ -58,3 +58,4 @@ depends-on: ["0004", "0006"]
 - [[0004]]: `mod_revision` の CAS 付き `Txn` を備えるストア契約
 - [[0006]]: 本体と所有権を分離するキー空間の定義
 - [[0010]]: 逆参照索引の同一 `Txn` での更新
+- [[0030]]: 本決定の実現方式（`core/resource/ownership` の圧縮トライ・純粋計画核、`Objects` と `core/wire` の単一 CAS `Txn` 結合、`spec/Nayutar/Ownership.lean` の 16 定理と DRT）を定める
