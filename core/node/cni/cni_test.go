@@ -82,6 +82,9 @@ func TestBridgeChainConfigUsesRangesNotDeprecatedSubnet(t *testing.T) {
 	if brCfg["cniVersion"] != CNIVersion {
 		t.Fatalf("cniVersion = %v, want %s", brCfg["cniVersion"], CNIVersion)
 	}
+	if brCfg["isGateway"] != true || brCfg["isDefaultGateway"] != true {
+		t.Fatalf("expected isGateway and isDefaultGateway true, got %v / %v", brCfg["isGateway"], brCfg["isDefaultGateway"])
+	}
 	ipam := brCfg["ipam"].(map[string]any)
 	if _, deprecated := ipam["subnet"]; deprecated {
 		t.Fatalf("bridge ipam must not use deprecated top-level subnet: %s", steps[1].Config)

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/Kaikei-e/Nayutar/core/node"
 	"github.com/Kaikei-e/Nayutar/core/node/lifecycle"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 )
 
 // TaskScript controls one simulated task execution's lifetime and signal behavior.
@@ -532,20 +532,20 @@ type SimReport struct {
 // RunSeed executes a single seed-reproducible workload and fault injection scenario against node.Runner.
 // Callers should invoke RunSeed inside testing/synctest.Test so virtual time runs instantly and deterministically.
 func RunSeed(seed uint64) (SimReport, error) {
-	rng := rand.New(rand.NewPCG(seed, 0x6e6f646573696d))
+	rng := sim.NewDetRandStream(seed, 0x6e6f646573696d)
 	policies := []lifecycle.RestartPolicy{
 		lifecycle.RestartNever,
 		lifecycle.RestartOnFailure,
 		lifecycle.RestartAlways,
 	}
-	policy := policies[rng.IntN(len(policies))]
-	stopGraceMs := int64(50 + rng.IntN(450))
-	backoffBaseMs := int64(20 + rng.IntN(180))
-	backoffMaxMs := backoffBaseMs * int64(1+rng.IntN(8))
-	backoffResetMs := int64(200 + rng.IntN(1000))
+	policy := policies[sim.IntN(rng, len(policies))]
+	stopGraceMs := int64(50 + sim.IntN(rng, 450))
+	backoffBaseMs := int64(20 + sim.IntN(rng, 180))
+	backoffMaxMs := backoffBaseMs * int64(1+sim.IntN(rng, 8))
+	backoffResetMs := int64(200 + sim.IntN(rng, 1000))
 
 	faults := DefaultFaults()
-	switch r := rng.IntN(100); {
+	switch r := sim.IntN(rng, 100); {
 	case r < 10:
 		faults.FailCreateNetns = true
 	case r < 20:
@@ -568,29 +568,29 @@ func RunSeed(seed uint64) (SimReport, error) {
 	scripts := make([]TaskScript, maxScripts)
 	for i := range maxScripts {
 		durMs := int64(0)
-		if rng.IntN(100) < 80 {
-			if rng.IntN(100) < 35 {
-				durMs = backoffResetMs + int64(rng.IntN(300))
+		if sim.IntN(rng, 100) < 80 {
+			if sim.IntN(rng, 100) < 35 {
+				durMs = backoffResetMs + int64(sim.IntN(rng, 300))
 			} else {
-				durMs = int64(10 + rng.IntN(int(max(int64(20), backoffResetMs/2))))
+				durMs = int64(10 + sim.IntN(rng, int(max(int64(20), backoffResetMs/2))))
 			}
 		}
 		code := uint32(0)
-		if rng.IntN(100) < 60 {
-			code = uint32(1 + rng.IntN(5))
+		if sim.IntN(rng, 100) < 60 {
+			code = uint32(1 + sim.IntN(rng, 5))
 		}
 		scripts[i] = TaskScript{
 			RunDuration:   time.Duration(durMs) * time.Millisecond,
 			ExitCode:      code,
-			IgnoreSIGTERM: rng.IntN(100) < 40,
-			TermDelay:     time.Duration(rng.IntN(30)) * time.Millisecond,
+			IgnoreSIGTERM: sim.IntN(rng, 100) < 40,
+			TermDelay:     time.Duration(sim.IntN(rng, 30)) * time.Millisecond,
 		}
 	}
 	faults.TaskBehavior = func(attempt int, _ node.ContainerSpec) TaskScript {
 		return scripts[attempt%len(scripts)]
 	}
 
-	stopAfter := time.Duration(300+rng.IntN(3000)) * time.Millisecond
+	stopAfter := time.Duration(300+sim.IntN(rng, 3000)) * time.Millisecond
 	world := NewWorld(node.RealClock(), 2, faults)
 
 	unit := node.UnitSpec{
@@ -622,7 +622,7 @@ func RunSeed(seed uint64) (SimReport, error) {
 		return SimReport{}, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), stopAfter)
+	ctx, cancel := sim.WithTimeout(context.Background(), node.RealClock(), stopAfter)
 	defer cancel()
 
 	finalState, runErr := runner.Run(ctx)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Kaikei-e/Nayutar/core/node"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/pkg/cio"
@@ -44,6 +45,7 @@ type Config struct {
 	RuntimeName    string
 	CleanupTimeout time.Duration
 	IOCreator      cio.Creator
+	Clock          sim.Clock
 }
 
 func (c Config) withDefaults() Config {
@@ -61,6 +63,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.CleanupTimeout <= 0 {
 		c.CleanupTimeout = defaultCleanupTimeout
+	}
+	if c.Clock == nil {
+		c.Clock = sim.RealClock()
 	}
 	if c.IOCreator == nil {
 		c.IOCreator = cio.NullIO
@@ -116,7 +121,7 @@ func (a *Adapter) nsContext(ctx context.Context) context.Context {
 
 func (a *Adapter) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	base := a.nsContext(context.WithoutCancel(ctx))
-	return context.WithTimeout(base, a.cfg.CleanupTimeout)
+	return sim.WithTimeout(base, a.cfg.Clock, a.cfg.CleanupTimeout)
 }
 
 // withTempLease acquires a short-lived containerd GC lease so content/snapshots cannot be

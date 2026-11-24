@@ -24,6 +24,8 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
   - HTTP/2 LKAL-JSON ワイヤ層（`core/wire`）と 2 入口 Patch / Diff（`core/resource/patch` と `Objects.Patch` / `PatchStatus`）：ADR 0012 → ADR 0029（タグなし決定論的 CBOR は G2 に残してある）
   - 葉パス所有権（`core/resource/ownership` と `Objects`・`core/wire` の単一 CAS `Txn` 更新）：ADR 0013 → ADR 0030
   - containerd v2.3 の直接駆動と CNI・netns 管理（`core/node` と `cmd/lk-node`）：ADR 0014 → ADR 0031（CSI Node は後続 ADR）
+  - シミュレーション境界の 4 インターフェースと決定論的イベントキュー（`core/sim` と `core/sim/clustersim`）：ADR 0015 → ADR 0032
+  - 既定拒否の `nftables` ネットワークポリシーとテナント別ブリッジ（`core/netpol` と `core/node`）：ADR 0016 → ADR 0033（G2 での `cilium/ebpf` 比較は後続 ADR）。実データプレーンの穴（送信元の詐称・同一ブリッジ内の L2 転送・ホスト宛の通信・設定の組み合わせ）を塞ぐ補強は ADR 0034（`proposed`。ガードとブリッジ族の写像は Lean モデルの外にあり、実カーネルの試験で確かめる）
 - Export と `Binding`、CSI Node、ESR の証明、Kubernetes との差分試験は後続 ADR の範囲であり、まだ実装していない。
 - コードを書き始める前に、その決定を ADR として起票する。
 
@@ -41,6 +43,8 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
 | リソースの封筒 | `core/resource/AGENTS.md` | 封筒の形、2 つの書き込みの入口、更新規則、ストア結合 |
 | HTTP/2 ワイヤ層 | `core/wire/AGENTS.md` | HTTP/2 LKAL-JSON ハンドラ・スキーマ・クライアント・`410 Gone`・DoS 防止 |
 | ノードのコンテナ実行 | `core/node/AGENTS.md` | 純粋ライフサイクル核、containerd v2.3・netns・CNI、`nodesim`、`cmd/lk-node` |
+| シミュレーション基盤 | `core/sim/AGENTS.md` | `Clock`・`Net`・`Disk`・`Rand`、決定論 PRNG、離散イベントキュー、`clustersim` |
+| ネットワークポリシー | `core/netpol/AGENTS.md` | 純粋ポリシー核、テナント別ブリッジ、`nft -f -` 原子置換、Lean モデル |
 | 開発環境の宣言と kisage | `config/AGENTS.md` | `config/dev.lkal`、開発用 etcd、kisage の使い方と信頼境界 |
 | エージェントハーネス | `scripts/agent-harness/AGENTS.md` | ガードが止めるものの一覧、編集後の検査、自己検査 |
 

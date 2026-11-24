@@ -100,13 +100,13 @@ func TestIsolation(t *testing.T) {
 }
 
 func TestContract(t *testing.T) {
-	storetest.Run(t, func(t *testing.T) store.Store {
+	storetest.RunSynctest(t, func(t *testing.T) store.Store {
 		return mustAdapter(t, memstore.New(), "acme")
 	})
 }
 
 func TestLinearizability(t *testing.T) {
-	storetest.RunLinearizability(t, func(t *testing.T) store.Store {
+	storetest.RunLinearizabilitySynctest(t, func(t *testing.T) store.Store {
 		return mustAdapter(t, memstore.New(), "acme")
 	})
 }

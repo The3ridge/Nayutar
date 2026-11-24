@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -20,6 +19,8 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+
+	"github.com/Kaikei-e/Nayutar/core/sim"
 )
 
 // Members is the fixed number of members in a test cluster.
@@ -485,7 +486,8 @@ func claimPortBlock(n int) ([]string, *os.File, error) {
 	if err := os.MkdirAll(lockDir, 0o700); err != nil {
 		return nil, nil, err
 	}
-	start := rand.IntN(portBlockCount)
+	rng := sim.NewDetRand(uint64(os.Getpid()) ^ uint64(time.Now().UnixNano()))
+	start := int(rng.Int64N(portBlockCount))
 	for offset := range portBlockCount {
 		base := portBlockMin + ((start+offset)%portBlockCount)*portBlockStep
 		lockPath := filepath.Join(lockDir, fmt.Sprintf("%d.lock", base))

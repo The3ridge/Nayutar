@@ -11,7 +11,9 @@ import (
 
 	"github.com/Kaikei-e/LKAL"
 	"github.com/Kaikei-e/LKAL/schema"
+	"github.com/Kaikei-e/Nayutar/core/netpol"
 	"github.com/Kaikei-e/Nayutar/core/node/lifecycle"
+	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 )
 
 //go:embed node.schema.lkal
@@ -57,9 +59,16 @@ type CNIConfig struct {
 	Ranges   []CNIRangeConfig
 }
 
+// NetpolConfig configures optional host nftables network policy enforcement before unit startup.
+type NetpolConfig struct {
+	PolicyFile string
+	NftBin     string
+}
+
 // UnitSpec describes one managed container unit and its lifecycle parameters.
 type UnitSpec struct {
 	ID         string
+	Tenant     string
 	Image      string
 	Command    []string
 	Args       []string
@@ -74,6 +83,7 @@ type Config struct {
 	Containerd ContainerdConfig
 	CNI        CNIConfig
 	Unit       UnitSpec
+	Netpol     *NetpolConfig
 }
 
 // DecodeConfig parses, completes defaults, validates against Schema(), and decodes an LKAL config.
@@ -81,6 +91,10 @@ func DecodeConfig(name string, src []byte) (Config, error) {
 	f, err := lkal.Parse(name, src)
 	if err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", name, err)
+	}
+	rawBridgeExplicit := false
+	if rawCNI, ok := recordField(f.Data(), "cni"); ok {
+		rawBridgeExplicit = hasField(rawCNI, "bridge")
 	}
 	completed, err := compiledNodeSchema.Complete(f.Data())
 	if err != nil {
@@ -160,6 +174,37 @@ func DecodeConfig(name string, src []byte) (Config, error) {
 	if strings.Contains(unitID, "..") {
 		return Config{}, fmt.Errorf("validate %s: unit.id %q must not contain \"..\"", name, unitID)
 	}
+	unitTenant := optionalStringField(unitRec, "tenant")
+	if unitTenant != "" {
+		if err := keyspace.ValidateTenant(unitTenant); err != nil {
+			return Config{}, fmt.Errorf("validate %s: unit.tenant %q: %w", name, unitTenant, err)
+		}
+		if !hasField(root, "netpol") {
+			return Config{}, fmt.Errorf("validate %s: unit.tenant %q requires a netpol block", name, unitTenant)
+		}
+		tenantBridge := netpol.TenantBridgeName(unitTenant)
+		if rawBridgeExplicit && cfg.CNI.Bridge != tenantBridge {
+			return Config{}, fmt.Errorf("validate %s: cni.bridge %q must equal the tenant bridge %q for unit.tenant %q", name, cfg.CNI.Bridge, tenantBridge, unitTenant)
+		}
+		cfg.CNI.Bridge = tenantBridge
+	} else if netpol.IsTenantBridgeName(cfg.CNI.Bridge) {
+		return Config{}, fmt.Errorf("validate %s: cni.bridge %q uses the reserved %q prefix but unit.tenant is not set", name, cfg.CNI.Bridge, netpol.TenantBridgePrefix)
+	}
+
+	if npRec, ok := recordField(root, "netpol"); ok {
+		policyFile := mustStringField(npRec, "policyFile")
+		nftBin := mustStringField(npRec, "nftBin")
+		if !filepath.IsAbs(policyFile) || filepath.Clean(policyFile) != policyFile {
+			return Config{}, fmt.Errorf("validate %s: netpol.policyFile %q must be a clean absolute path", name, policyFile)
+		}
+		if !filepath.IsAbs(nftBin) || filepath.Clean(nftBin) != nftBin {
+			return Config{}, fmt.Errorf("validate %s: netpol.nftBin %q must be a clean absolute path", name, nftBin)
+		}
+		cfg.Netpol = &NetpolConfig{
+			PolicyFile: policyFile,
+			NftBin:     nftBin,
+		}
+	}
 
 	var mounts []Mount
 	if mountRec, ok := recordField(unitRec, "mounts"); ok && len(mountRec.Fields) > 0 {
@@ -224,6 +269,7 @@ func DecodeConfig(name string, src []byte) (Config, error) {
 
 	cfg.Unit = UnitSpec{
 		ID:         unitID,
+		Tenant:     unitTenant,
 		Image:      mustStringField(unitRec, "image"),
 		Command:    optionalStringList(unitRec, "command"),
 		Args:       optionalStringList(unitRec, "args"),
@@ -283,6 +329,15 @@ func parseRestartPolicy(s string) (lifecycle.RestartPolicy, error) {
 	default:
 		return 0, fmt.Errorf("unknown restart policy %q", s)
 	}
+}
+
+func hasField(rec lkal.Record, key string) bool {
+	for _, f := range rec.Fields {
+		if f.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func recordField(rec lkal.Record, key string) (lkal.Record, bool) {

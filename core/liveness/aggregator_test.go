@@ -382,7 +382,7 @@ func TestAggregatorWatchReloadAndCASRetry(t *testing.T) {
 			reg := liveness.NewRegistry(raw)
 
 			startWall := time.Unix(1700000000, 0).UTC()
-			clk := offsetClock{offset: startWall.Sub(time.Now())}
+			clk := offsetClock{offset: time.Until(startWall)}
 
 			ctx := context.Background()
 			if _, err := reg.Register(ctx, "n1", "r1", clk.Now().UnixMilli()); err != nil {
@@ -1691,8 +1691,8 @@ func TestAggregatorRoundBase(t *testing.T) {
 			return round
 		}
 
-		r1 := firstRound(t, offsetClock{offset: t0.Sub(time.Now())}, 0)
-		r2 := firstRound(t, offsetClock{offset: t0.Add(time.Millisecond).Sub(time.Now())}, 0)
+		r1 := firstRound(t, offsetClock{offset: time.Until(t0)}, 0)
+		r2 := firstRound(t, offsetClock{offset: time.Until(t0.Add(time.Millisecond))}, 0)
 		wantR1 := (uint64(t0.UnixMilli()) << 10) + 1
 		wantR2 := (uint64(t0.Add(time.Millisecond).UnixMilli()) << 10) + 1
 		if r1 != wantR1 || r2 != wantR2 {
@@ -1703,7 +1703,7 @@ func TestAggregatorRoundBase(t *testing.T) {
 		}
 
 		const explicitBase = uint64(42_000)
-		r3 := firstRound(t, offsetClock{offset: t0.Sub(time.Now())}, explicitBase)
+		r3 := firstRound(t, offsetClock{offset: time.Until(t0)}, explicitBase)
 		if r3 != explicitBase+1 {
 			t.Fatalf("explicit RoundBase first round = %d, want %d", r3, explicitBase+1)
 		}

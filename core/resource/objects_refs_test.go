@@ -372,7 +372,7 @@ func checkObjectsRefsSuite(t *testing.T, newRoot func(*testing.T) store.Store) {
 			f("primary", lkal.Ref{"secret", "db"}),
 			f("priv", lkal.Ref{"secret", "private"}),
 		))
-		assertRefsErr(t, err, refs.ErrDenied)
+		_ = assertRefsErr(t, err, refs.ErrDenied)
 		if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
 			t.Fatalf("denied Create moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 		}
@@ -386,7 +386,7 @@ func checkObjectsRefsSuite(t *testing.T, newRoot func(*testing.T) store.Store) {
 			f("primary", lkal.Ref{"secret", "db"}),
 			f("priv", lkal.Ref{"secret", "private"}),
 		))
-		assertRefsErr(t, err, refs.ErrDenied)
+		_ = assertRefsErr(t, err, refs.ErrDenied)
 		if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
 			t.Fatalf("denied Update moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 		}
@@ -398,7 +398,7 @@ func checkObjectsRefsSuite(t *testing.T, newRoot func(*testing.T) store.Store) {
 		_, err = objs.Create(ctx, cedarAlice, workloadRefCand("blocked-path",
 			f("forbiddenSecret", lkal.Ref{"secret", "db"}),
 		))
-		assertRefsErr(t, err, refs.ErrDenied)
+		_ = assertRefsErr(t, err, refs.ErrDenied)
 		if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
 			t.Fatalf("forbid sourcePath Create moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 		}
@@ -407,7 +407,7 @@ func checkObjectsRefsSuite(t *testing.T, newRoot func(*testing.T) store.Store) {
 		_, err = objs.Create(ctx, cedarBob, workloadRefCand("blocked-bob",
 			f("primary", lkal.Ref{"secret", "db"}),
 		))
-		assertRefsErr(t, err, refs.ErrDenied)
+		_ = assertRefsErr(t, err, refs.ErrDenied)
 		if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
 			t.Fatalf("wrong principal Create moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 		}
@@ -422,7 +422,7 @@ permit(principal, action == Nayutar::Action::"Reference", resource) when { resou
 		_, err = errPolicyObjs.Create(ctx, cedarAlice, workloadRefCand("blocked-eval",
 			f("primary", lkal.Ref{"secret", "db"}),
 		))
-		assertRefsErr(t, err, refs.ErrDenied)
+		_ = assertRefsErr(t, err, refs.ErrDenied)
 		if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
 			t.Fatalf("eval-error policy Create moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 		}
@@ -467,7 +467,7 @@ permit(principal, action == Nayutar::Action::"Reference", resource) when { resou
 		for _, tc := range malformed {
 			t.Run(tc.name, func(t *testing.T) {
 				_, err := objs.Create(ctx, cedarAlice, workloadRefCand("bad-notation", f("r", tc.ref)))
-				assertRefsErr(t, err, refs.ErrMalformed)
+				_ = assertRefsErr(t, err, refs.ErrMalformed)
 				if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
 					t.Fatalf("malformed Create moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 				}
@@ -475,7 +475,7 @@ permit(principal, action == Nayutar::Action::"Reference", resource) when { resou
 		}
 
 		_, err = objs.Create(ctx, cedarAlice, workloadRefCand("bad-kind", f("secrets", rec(f("item", lkal.Ref{"configmap", "cm"})))))
-		assertRefsErr(t, err, refs.ErrKind)
+		_ = assertRefsErr(t, err, refs.ErrKind)
 		if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
 			t.Fatalf("disallowed kind Create moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 		}
@@ -586,7 +586,7 @@ permit(principal, action == Nayutar::Action::"Reference", resource) when { resou
 			t.Fatal(err)
 		}
 		_, err = alphaObjs.Create(ctx, cedarAlice, workloadRefCand("w-missing", f("s", lkal.Ref{"secret", "only-in-beta"})))
-		assertRefsErr(t, err, refs.ErrNotFound)
+		_ = assertRefsErr(t, err, refs.ErrNotFound)
 		if revAfter, err := root.CurrentRev(ctx); err != nil || revAfter != revBefore {
 			t.Fatalf("cross-tenant notFound moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 		}
@@ -628,7 +628,7 @@ permit(
 		if _, err := betaLabelObjs.Create(ctx, cedarAlice, workloadRefCand("w2", f("s", lkal.Ref{"secret", "shared"}))); err == nil {
 			t.Fatal("beta Create(w2) succeeded, want ErrDenied")
 		} else {
-			assertRefsErr(t, err, refs.ErrDenied)
+			_ = assertRefsErr(t, err, refs.ErrDenied)
 		}
 	})
 }
@@ -642,7 +642,7 @@ type targetMutatingBeforeTxnStore struct {
 func (w *targetMutatingBeforeTxnStore) Txn(ctx context.Context, cmps []store.Cmp, ops []store.Op) (bool, store.Rev, error) {
 	if !w.mutated {
 		w.mutated = true
-		kv, _, err := w.Store.Get(ctx, w.targetKey, 0)
+		kv, _, err := w.Get(ctx, w.targetKey, 0)
 		if err != nil {
 			return false, 0, err
 		}
@@ -788,7 +788,7 @@ func TestObjectsReferences(t *testing.T) {
 			f("meta", rec(f("kind", lkal.String("workload")), f("name", lkal.String("over40")))),
 			f("status", rec(f("phase", lkal.String("Ready")))),
 		))
-		assertRefsErr(t, err, refs.ErrInternal)
+		_ = assertRefsErr(t, err, refs.ErrInternal)
 		if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
 			t.Fatalf("UpdateStatus(>32 stored) moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 		}
@@ -823,7 +823,7 @@ func TestObjectsReferences(t *testing.T) {
 		if !updateCalled {
 			t.Fatal("afterFirst hook was not called during scan Delete")
 		}
-		assertRefsErr(t, updateErr, refs.ErrInternal)
+		_ = assertRefsErr(t, updateErr, refs.ErrInternal)
 		if _, err := objs.Get(ctx, raceObj); !errors.Is(err, resource.ErrNotFound) {
 			t.Fatalf("Get after race Delete = %v, want ErrNotFound", err)
 		}
@@ -1003,7 +1003,7 @@ func TestObjectsReferences(t *testing.T) {
 		if _, err := objs.Update(ctx, testPrincipal, workloadRefCand("phase1")); err == nil {
 			t.Fatal("Update(phase1) succeeded, want ErrInternal")
 		} else {
-			assertRefsErr(t, err, refs.ErrInternal)
+			_ = assertRefsErr(t, err, refs.ErrInternal)
 		}
 		if _, err := objs.UpdateStatus(ctx, rec(
 			f("meta", rec(f("kind", lkal.String("workload")), f("name", lkal.String("phase1")))),
@@ -1011,23 +1011,23 @@ func TestObjectsReferences(t *testing.T) {
 		)); err == nil {
 			t.Fatal("UpdateStatus(phase1) succeeded, want ErrInternal")
 		} else {
-			assertRefsErr(t, err, refs.ErrInternal)
+			_ = assertRefsErr(t, err, refs.ErrInternal)
 		}
 
 		// Missing target with allow -> ErrNotFound; with deny -> ErrDenied.
 		auth.allow = func(refs.Request) bool { return true }
 		_, err = objs.Create(ctx, testPrincipal, workloadRefCand("missing-allow", f("r", lkal.Ref{"secret", "missing"})))
-		assertRefsErr(t, err, refs.ErrNotFound)
+		_ = assertRefsErr(t, err, refs.ErrNotFound)
 
 		auth.allow = func(refs.Request) bool { return false }
 		_, err = objs.Create(ctx, testPrincipal, workloadRefCand("missing-deny", f("r", lkal.Ref{"secret", "missing"})))
-		assertRefsErr(t, err, refs.ErrDenied)
+		_ = assertRefsErr(t, err, refs.ErrDenied)
 
 		// Unreadable target with deny -> ErrDenied; with allow -> ErrInternal naming target.
 		auth.Reset()
 		auth.allow = func(refs.Request) bool { return false }
 		_, err = objs.Create(ctx, testPrincipal, workloadRefCand("unreadable-deny", f("r", lkal.Ref{"secret", "garbage"})))
-		assertRefsErr(t, err, refs.ErrDenied)
+		_ = assertRefsErr(t, err, refs.ErrDenied)
 		reqs := auth.Requests()
 		if len(reqs) != 1 || reqs[0].TargetExists || reqs[0].TargetLabels != nil {
 			t.Fatalf("authorizer saw %+v for unreadable target, want TargetExists=false, TargetLabels=nil", reqs)
@@ -1046,7 +1046,7 @@ func TestObjectsReferences(t *testing.T) {
 		auth.Reset()
 		for _, p := range []refs.Principal{{Type: "", ID: "alice"}, {Type: "User", ID: ""}} {
 			_, err = objs.Create(ctx, p, workloadRefCand("empty-principal", f("r", lkal.Ref{"secret", "present"})))
-			assertRefsErr(t, err, refs.ErrDenied)
+			_ = assertRefsErr(t, err, refs.ErrDenied)
 		}
 		if len(auth.Requests()) != 0 {
 			t.Fatalf("empty principal called authorizer %d times, want 0", len(auth.Requests()))
@@ -1057,7 +1057,7 @@ func TestObjectsReferences(t *testing.T) {
 		nilAuthCfg.Authorizer = nil
 		nilAuthObjs := resource.NewObjects(st, nilAuthCfg)
 		_, err = nilAuthObjs.Create(ctx, testPrincipal, workloadRefCand("nil-auth", f("r", lkal.Ref{"secret", "present"})))
-		assertRefsErr(t, err, refs.ErrDenied)
+		_ = assertRefsErr(t, err, refs.ErrDenied)
 
 		// 32 targets ok, 33 malformed.
 		auth.allow = func(refs.Request) bool { return true }
@@ -1074,11 +1074,11 @@ func TestObjectsReferences(t *testing.T) {
 		}
 		list33 := append(slices.Clone(list32), lkal.Ref{"secret", "lim32"})
 		_, err = objs.Create(ctx, testPrincipal, workloadRefCand("bad33", f("list", list33)))
-		assertRefsErr(t, err, refs.ErrMalformed)
+		_ = assertRefsErr(t, err, refs.ErrMalformed)
 
 		// Self reference: Create -> ErrNotFound; Update -> ok and no duplicate target cmp.
 		_, err = objs.Create(ctx, testPrincipal, workloadRefCand("self", f("self", lkal.Ref{"workload", "self"})))
-		assertRefsErr(t, err, refs.ErrNotFound)
+		_ = assertRefsErr(t, err, refs.ErrNotFound)
 
 		spy := &spyCmpStore{Store: st}
 		spyObjs := resource.NewObjects(spy, cfg)
@@ -1209,7 +1209,7 @@ func TestObjectsReferences(t *testing.T) {
 				t.Fatalf("Create error detail = %q, want invalid schema message", re.Detail)
 			}
 			_, err = badObjs.Update(ctx, testPrincipal, workloadRefCand("existing", f("n", lkal.Int(1))))
-			assertRefsErr(t, err, refs.ErrInternal)
+			_ = assertRefsErr(t, err, refs.ErrInternal)
 			if revAfter, err := st.CurrentRev(ctx); err != nil || revAfter != revBefore {
 				t.Fatalf("invalid schema moved revision: %d -> %d (err=%v)", revBefore, revAfter, err)
 			}
@@ -1244,10 +1244,10 @@ func TestObjectsReferences(t *testing.T) {
 				}
 
 				_, err = badObjs.Create(ctx, testPrincipal, workloadRefCand("new-with-ref", f("s", lkal.Ref{"secret", "db"})))
-				assertRefsErr(t, err, refs.ErrInternal)
+				_ = assertRefsErr(t, err, refs.ErrInternal)
 
 				_, err = badObjs.Update(ctx, testPrincipal, workloadRefCand("existing", f("s", lkal.Ref{"secret", "db"})))
-				assertRefsErr(t, err, refs.ErrInternal)
+				_ = assertRefsErr(t, err, refs.ErrInternal)
 
 				if len(auth.Requests()) != 0 {
 					t.Fatalf("invalid tenant %q called authorizer %d times, want 0", badTenant, len(auth.Requests()))
@@ -1272,7 +1272,7 @@ func TestObjectsReferences(t *testing.T) {
 			nilAuthCfg.Schemas = testRefSchemas()
 			nilAuthObjs := resource.NewObjects(st, nilAuthCfg)
 			_, err := nilAuthObjs.Create(ctx, testPrincipal, workloadRefCand("nil-auth-bad-tenant", f("s", lkal.Ref{"secret", "db"})))
-			assertRefsErr(t, err, refs.ErrDenied)
+			_ = assertRefsErr(t, err, refs.ErrDenied)
 		})
 	})
 }

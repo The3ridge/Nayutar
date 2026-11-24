@@ -10,6 +10,7 @@ import Nayutar.Drt.OrderedSet
 import Nayutar.Drt.Patch
 import Nayutar.Drt.Ownership
 import Nayutar.Drt.Node
+import Nayutar.Drt.Netpol
 
 open Lean
 open Nayutar.Fixture
@@ -118,6 +119,8 @@ def main (args : List String) : IO UInt32 := do
     runSuite Nayutar.Drt.Ownership.parseCase Nayutar.Drt.Ownership.caseToJson
   | ["node"] =>
     runSuite Nayutar.Drt.Node.parseCase Nayutar.Drt.Node.caseToJson
+  | ["netpol"] =>
+    runSuite Nayutar.Drt.Netpol.parseCase Nayutar.Drt.Netpol.caseToJson
   | _ =>
-    IO.eprintln "usage: nayutar-drt register|store|keyspace|watchcache|liveness|envelope|refs|orderedset|patch|ownership|node"
+    IO.eprintln "usage: nayutar-drt register|store|keyspace|watchcache|liveness|envelope|refs|orderedset|patch|ownership|node|netpol"
     return 2

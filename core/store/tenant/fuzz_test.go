@@ -17,7 +17,7 @@ func isRFC1123Label(s string) bool {
 	}
 	for i, r := range []byte(s) {
 		alnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
-		if !alnum && !(r == '-' && i != 0 && i != len(s)-1) {
+		if !alnum && (r != '-' || i == 0 || i == len(s)-1) {
 			return false
 		}
 	}

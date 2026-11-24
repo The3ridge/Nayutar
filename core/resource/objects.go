@@ -3,7 +3,6 @@ package resource
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"github.com/Kaikei-e/Nayutar/core/resource/ownership"
 	"github.com/Kaikei-e/Nayutar/core/resource/patch"
 	"github.com/Kaikei-e/Nayutar/core/resource/refs"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 	"github.com/Kaikei-e/Nayutar/core/store/tenant"
@@ -42,10 +42,10 @@ type ScopeResolver func(principal refs.Principal, obj keyspace.Object) (ownershi
 
 // Config configures clock, randomness, tenant identity, per-kind LKAL v0.2 schemas,
 // reference authorization, and leaf-path ownership scope resolution for an Objects handle.
-// Rand is read from every goroutine that calls Create or Apply and must be safe for concurrent use (crypto/rand.Reader is).
+// Rand is read from every goroutine that calls Create or Apply and must be safe for concurrent use.
 type Config struct {
-	Now           func() time.Time // defaults to time.Now
-	Rand          io.Reader        // defaults to crypto/rand.Reader
+	Now           func() time.Time // defaults to sim.RealClock().Now
+	Rand          io.Reader        // defaults to sim.RandReader(sim.CryptoRand())
 	Tenant        string
 	Schemas       Schemas
 	Authorizer    refs.Authorizer
@@ -69,11 +69,11 @@ type Objects struct {
 func NewObjects(st tenant.Store, cfg Config) *Objects {
 	nowFn := cfg.Now
 	if nowFn == nil {
-		nowFn = time.Now
+		nowFn = sim.RealClock().Now
 	}
 	randReader := cfg.Rand
 	if randReader == nil {
-		randReader = rand.Reader
+		randReader = sim.RandReader(sim.CryptoRand())
 	}
 	clonedSchemas := maps.Clone(cfg.Schemas)
 	derivedRefs, schemaErr := validateSchemasMap(clonedSchemas)

@@ -79,7 +79,17 @@
     "Nayutar.Node.kill_requires_grace_elapsed",
     "Nayutar.Node.restart_policy_sound",
     "Nayutar.Node.backoff_bounded_and_monotone",
-    "Nayutar.Node.backoff_resets_after_healthy_run"
+    "Nayutar.Node.backoff_resets_after_healthy_run",
+    "Nayutar.Netpol.invalid_conn_dropped",
+    "Nayutar.Netpol.established_related_accepted",
+    "Nayutar.Netpol.compile_tenants_cidrs_disjoint",
+    "Nayutar.Netpol.default_deny_cross_tenant_when_no_rules",
+    "Nayutar.Netpol.intra_tenant_allow_mode_accepts",
+    "Nayutar.Netpol.cross_tenant_requires_mutual_allow",
+    "Nayutar.Netpol.external_transit_always_dropped",
+    "Nayutar.Netpol.chain_names_disjoint",
+    "Nayutar.Netpol.compiled_nft_matches_evaluate",
+    "Nayutar.Netpol.compile_order_independent"
   ],
   "permitted_axioms": [
     "propext",

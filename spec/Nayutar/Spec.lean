@@ -8,6 +8,7 @@ import Nayutar.OrderedSet
 import Nayutar.Patch
 import Nayutar.Ownership
 import Nayutar.Node
+import Nayutar.Netpol
 
 namespace Nayutar
 

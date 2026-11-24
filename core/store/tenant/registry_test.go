@@ -43,13 +43,13 @@ func TestRegistry(t *testing.T) {
 }
 
 func TestFencedContract(t *testing.T) {
-	storetest.Run(t, func(t *testing.T) store.Store {
+	storetest.RunSynctest(t, func(t *testing.T) store.Store {
 		return mustFencedAdapter(t, memstore.New(), "acme")
 	})
 }
 
 func TestFencedLinearizability(t *testing.T) {
-	storetest.RunLinearizability(t, func(t *testing.T) store.Store {
+	storetest.RunLinearizabilitySynctest(t, func(t *testing.T) store.Store {
 		return mustFencedAdapter(t, memstore.New(), "acme")
 	})
 }

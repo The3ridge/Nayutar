@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Kaikei-e/Nayutar/core/sim"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/watchcache/window"
 )
@@ -33,15 +34,7 @@ type Source interface {
 }
 
 // Clock is the time source of a cache.
-type Clock interface {
-	Now() time.Time
-	After(d time.Duration) <-chan time.Time
-}
-
-type realClock struct{}
-
-func (realClock) Now() time.Time                         { return time.Now() }
-func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+type Clock = sim.Clock
 
 // Config controls retention, timeouts, and polling intervals of a Cache.
 // Zero fields take their defaults.
@@ -100,7 +93,7 @@ func validateAndDefault(cfg Config) (Config, error) {
 		cfg.ListPageSize = defaultListPageSize
 	}
 	if cfg.Clock == nil {
-		cfg.Clock = realClock{}
+		cfg.Clock = sim.RealClock()
 	}
 	return cfg, nil
 }

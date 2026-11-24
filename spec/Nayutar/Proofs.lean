@@ -7,3 +7,4 @@ import Nayutar.Proofs.OrderedSet
 import Nayutar.Proofs.Patch
 import Nayutar.Proofs.Ownership
 import Nayutar.Proofs.Node
+import Nayutar.Proofs.Netpol

@@ -9,9 +9,9 @@ import (
 )
 
 func TestContract(t *testing.T) {
-	storetest.Run(t, func(*testing.T) store.Store { return memstore.New() })
+	storetest.RunSynctest(t, func(*testing.T) store.Store { return memstore.New() })
 }
 
 func TestLinearizability(t *testing.T) {
-	storetest.RunLinearizability(t, func(*testing.T) store.Store { return memstore.New() })
+	storetest.RunLinearizabilitySynctest(t, func(*testing.T) store.Store { return memstore.New() })
 }

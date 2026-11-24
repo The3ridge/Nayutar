@@ -2,12 +2,8 @@ package livesim_test
 
 import (
 	"errors"
-	"flag"
 	"fmt"
-	"math/rand/v2"
-	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,55 +12,24 @@ import (
 	"github.com/Kaikei-e/Nayutar/core/liveness/detector"
 	"github.com/Kaikei-e/Nayutar/core/liveness/hrw"
 	"github.com/Kaikei-e/Nayutar/core/liveness/livesim"
+	simcore "github.com/Kaikei-e/Nayutar/core/sim"
 )
 
-var flagSeed = flag.String("seed", "", "run only a single simulation seed")
-
+// Seeds that fail get appended here, keyed by test name, and always run whatever the default range is.
 var regressionSeeds = map[string][]uint64{
-	"TestEvictionPermitsAreRateLimited":     {2, 3},
-	"TestControlPlanePartition":             {79},
-	"TestMassFailureIsConfirmedByWitnesses": {122, 138},
-	"TestSmallClusterControlPlanePartition": {2, 18},
+	// Cut before any aggregator is self-suspicious: node probers must be asked even then.
+	"TestControlPlanePartition": {177, 1445, 1740},
+	// Cut healed just as self-suspicion clears: a round must remember it was opened while self-suspicious.
+	"TestSmallClusterControlPlanePartition": {19, 40, 121},
+	// Aggregators with fast and slow wall clocks must not exceed the permit budget in recorded time.
+	"TestEvictionPermitsAreRateLimited": {6, 14, 31},
 }
 
 func seeds(t *testing.T, testName string) []uint64 {
 	t.Helper()
-	if raw := strings.TrimSpace(os.Getenv("NAYUTAR_SIM_SEED")); raw != "" {
-		s, err := strconv.ParseUint(raw, 10, 64)
-		if err != nil {
-			t.Fatalf("invalid NAYUTAR_SIM_SEED %q: %v", raw, err)
-		}
-		return []uint64{s}
-	}
-	if raw := strings.TrimSpace(*flagSeed); raw != "" {
-		s, err := strconv.ParseUint(raw, 10, 64)
-		if err != nil {
-			t.Fatalf("invalid -seed %q: %v", raw, err)
-		}
-		return []uint64{s}
-	}
-
-	count := defaultSeedCount
-	if raw := strings.TrimSpace(os.Getenv("NAYUTAR_SIM_SEEDS")); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 {
-			t.Fatalf("invalid NAYUTAR_SIM_SEEDS %q", raw)
-		}
-		count = n
-	}
-
-	out := make([]uint64, 0, count+len(regressionSeeds[testName]))
-	seen := make(map[uint64]struct{}, count+len(regressionSeeds[testName]))
-	for i := 1; i <= count; i++ {
-		s := uint64(i)
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	for _, s := range regressionSeeds[testName] {
-		if _, ok := seen[s]; !ok {
-			seen[s] = struct{}{}
-			out = append(out, s)
-		}
+	out, err := simcore.ConfigFromEnv(simcore.SeedConfig{DefaultCount: defaultSeedCount, RegressionSeeds: regressionSeeds[testName]})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return out
 }
@@ -593,10 +558,10 @@ func TestDetectsStoppedNodes(t *testing.T) {
 		})
 		mustReadyBy(t, sim, cfg, 20_000, "TestDetectsStoppedNodes")
 
-		r := rand.New(rand.NewPCG(seed, 0x73746f70))
-		rackPerm := r.Perm(3)
-		node1 := cfg.Nodes[rackPerm[0]*10+r.IntN(10)].Name
-		node2 := cfg.Nodes[rackPerm[1]*10+r.IntN(10)].Name
+		r := simcore.NewDetRandStream(seed, 0x73746f70)
+		rackPerm := simcore.Perm(r, 3)
+		node1 := cfg.Nodes[rackPerm[0]*10+simcore.IntN(r, 10)].Name
+		node2 := cfg.Nodes[rackPerm[1]*10+simcore.IntN(r, 10)].Name
 		t1 := int64(25_000) + r.Int64N(60_000)
 		t2 := int64(25_000) + r.Int64N(60_000)
 
@@ -655,8 +620,8 @@ func TestRecoversToReady(t *testing.T) {
 		}
 		mustReadyBy(t, sim, cfg, 20_000, "TestRecoversToReady")
 
-		r := rand.New(rand.NewPCG(seed, 0x726563))
-		target := cfg.Nodes[r.IntN(len(cfg.Nodes))].Name
+		r := simcore.NewDetRandStream(seed, 0x726563)
+		target := cfg.Nodes[simcore.IntN(r, len(cfg.Nodes))].Name
 		sim.StopNode(target)
 
 		deadline := sim.Now() + 30_000
@@ -705,12 +670,12 @@ func TestEvictionPermitsAreRateLimited(t *testing.T) {
 			}
 			mustReadyBy(t, sim, cfg, 20_000, "TestEvictionPermitsAreRateLimited")
 
-			r := rand.New(rand.NewPCG(seed, 0x65766963))
-			rackPerm := r.Perm(20)
+			r := simcore.NewDetRandStream(seed, 0x65766963)
+			rackPerm := simcore.Perm(r, 20)
 			stopTimes := make(map[string]int64, 12)
 			stopAt := sim.Now()
 			for i := range 12 {
-				node := cfg.Nodes[rackPerm[i]*10+r.IntN(10)].Name
+				node := cfg.Nodes[rackPerm[i]*10+simcore.IntN(r, 10)].Name
 				sim.StopNode(node)
 				stopTimes[node] = stopAt
 			}
@@ -1111,19 +1076,23 @@ func TestDeterministic(t *testing.T) {
 		return sim.TraceHash(), sim.Writes()
 	}
 
-	seedList := seeds(t, "TestDeterministic")
-	for _, s := range seedList {
-		h1, w1 := runScenario(s)
-		h2, w2 := runScenario(s)
-		if h1 != h2 || !slices.Equal(w1, w2) {
-			failSeed(t, "TestDeterministic", s, fmt.Sprintf("non-deterministic run: hash1=%s hash2=%s", h1, h2))
-		}
-		hDiff, _ := runScenario(s ^ 0x9e3779b97f4a7c15)
-		if h1 == hDiff {
-			failSeed(t, "TestDeterministic", s, fmt.Sprintf("different seeds produced identical hash %s", h1))
+	seedList, err := simcore.ConfigFromEnv(simcore.SeedConfig{DefaultCount: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := seedList[0]
+	h0, w0 := runScenario(s)
+	for run := range 100 {
+		h, w := runScenario(s)
+		if h != h0 || !slices.Equal(w, w0) {
+			failSeed(t, "TestDeterministic", s, fmt.Sprintf("non-deterministic run %d: hash0=%s hash=%s", run, h0, h))
 		}
 	}
-	t.Logf("TestDeterministic: seeds=%d sim_time_ms=50000", len(seedList))
+	hDiff, _ := runScenario(s ^ 0x9e3779b97f4a7c15)
+	if h0 == hDiff {
+		failSeed(t, "TestDeterministic", s, fmt.Sprintf("different seeds produced identical hash %s", h0))
+	}
+	t.Logf("TestDeterministic: seed=%d runs=100 sim_time_ms=50000", s)
 }
 
 func TestRackFailureBelowSelfSuspicion(t *testing.T) {
@@ -1509,8 +1478,8 @@ func TestCrashAfterHealedCut(t *testing.T) {
 		}
 		mustReadyBy(t, sim, cfg, 20_000, "TestCrashAfterHealedCut")
 
-		r := rand.New(rand.NewPCG(seed, 0x6865616c))
-		target := cfg.Nodes[r.IntN(len(cfg.Nodes))].Name
+		r := simcore.NewDetRandStream(seed, 0x6865616c)
+		target := cfg.Nodes[simcore.IntN(r, len(cfg.Nodes))].Name
 		owners := hrw.Ranked(target, cfg.Aggregators)[:3]
 		nAddr := liveness.Addr{ID: target, Node: true}
 		for _, owner := range owners {
@@ -1583,12 +1552,12 @@ func TestEvictionsUnderChaos(t *testing.T) {
 			})
 			mustReadyBy(t, sim, cfg, 20_000, "TestEvictionsUnderChaos")
 
-			r := rand.New(rand.NewPCG(seed, 0x6368616f))
-			rackPerm := r.Perm(20)
+			r := simcore.NewDetRandStream(seed, 0x6368616f)
+			rackPerm := simcore.Perm(r, 20)
 			stopTimes := make(map[string]int64, 12)
 			stopAt := sim.Now()
 			for i := range 12 {
-				node := cfg.Nodes[rackPerm[i]*10+r.IntN(10)].Name
+				node := cfg.Nodes[rackPerm[i]*10+simcore.IntN(r, 10)].Name
 				sim.StopNode(node)
 				stopTimes[node] = stopAt
 			}

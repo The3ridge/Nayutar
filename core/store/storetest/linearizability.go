@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/anishathalye/porcupine"
@@ -484,6 +485,25 @@ func RunLinearizability(t *testing.T, newStore Factory) {
 			if err := CheckLinearizable(ctx, newStore(t), w); err != nil {
 				t.Fatal(err)
 			}
+		})
+	}
+}
+
+// RunLinearizabilitySynctest is RunLinearizability with every seed inside a
+// testing/synctest bubble, so the store, its timers and the checker's
+// deadlines run on virtual time. The history is ordered by the logical tick
+// counter, not by the clock, so virtual time does not weaken the check.
+func RunLinearizabilitySynctest(t *testing.T, newStore Factory) {
+	for seed := uint64(1); seed <= 5; seed++ {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				defer cancel()
+				w := Workload{Clients: 8, Ops: 60, Seed: seed}
+				if err := CheckLinearizable(ctx, newStore(t), w); err != nil {
+					t.Fatal(err)
+				}
+			})
 		})
 	}
 }

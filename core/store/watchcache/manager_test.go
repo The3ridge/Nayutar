@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Kaikei-e/Nayutar/core/store"
@@ -35,170 +36,178 @@ func mustObjectKey(t *testing.T, ten, group, kind, name string) (abs, rel string
 }
 
 func TestManagerCacheIdentityAndValidation(t *testing.T) {
-	ms := memstore.New()
-	if _, err := watchcache.NewManager(nil, shortConfig()); !errors.Is(err, store.ErrInvalidArgument) {
-		t.Fatalf("NewManager(nil) err = %v, want ErrInvalidArgument", err)
-	}
-	if _, err := watchcache.NewManager(ms, watchcache.Config{MinEvents: -1}); !errors.Is(err, store.ErrInvalidArgument) {
-		t.Fatalf("NewManager(bad cfg) err = %v, want ErrInvalidArgument", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ms := memstore.New()
+		if _, err := watchcache.NewManager(nil, shortConfig()); !errors.Is(err, store.ErrInvalidArgument) {
+			t.Fatalf("NewManager(nil) err = %v, want ErrInvalidArgument", err)
+		}
+		if _, err := watchcache.NewManager(ms, watchcache.Config{MinEvents: -1}); !errors.Is(err, store.ErrInvalidArgument) {
+			t.Fatalf("NewManager(bad cfg) err = %v, want ErrInvalidArgument", err)
+		}
 
-	m, err := watchcache.NewManager(ms, shortConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	t.Cleanup(m.Close)
-
-	c1, err := m.Objects("alpha", "core", "pod")
-	if err != nil {
-		t.Fatalf("Objects(alpha, core, pod): %v", err)
-	}
-	c1Again, err := m.Objects("alpha", "core", "pod")
-	if err != nil {
-		t.Fatalf("Objects(alpha, core, pod) again: %v", err)
-	}
-	if c1 != c1Again {
-		t.Fatal("expected same *Cache for identical (tenant, group, kind)")
-	}
-
-	otherTriples := [][3]string{
-		{"beta", "core", "pod"},
-		{"alpha", "apps.example.com", "pod"},
-		{"alpha", "core", "service"},
-	}
-	for _, tr := range otherTriples {
-		c, err := m.Objects(tr[0], tr[1], tr[2])
+		m, err := watchcache.NewManager(ms, shortConfig())
 		if err != nil {
-			t.Fatalf("Objects(%v): %v", tr, err)
+			t.Fatalf("NewManager: %v", err)
 		}
-		if c == c1 {
-			t.Fatalf("Objects(%v) returned same *Cache as (alpha, core, pod)", tr)
-		}
-	}
+		t.Cleanup(m.Close)
 
-	for _, badTenant := range []string{"", "BAD", "-a", "a/b"} {
-		if _, err := m.Objects(badTenant, "core", "pod"); !errors.Is(err, tenant.ErrInvalidName) {
-			t.Fatalf("Objects(tenant=%q) err = %v, want tenant.ErrInvalidName", badTenant, err)
+		c1, err := m.Objects("alpha", "core", "pod")
+		if err != nil {
+			t.Fatalf("Objects(alpha, core, pod): %v", err)
 		}
-	}
-	for _, badGroup := range []string{"", "apps", "CORE", "a/b"} {
-		if _, err := m.Objects("alpha", badGroup, "pod"); !errors.Is(err, keyspace.ErrInvalid) {
-			t.Fatalf("Objects(group=%q) err = %v, want keyspace.ErrInvalid", badGroup, err)
+		c1Again, err := m.Objects("alpha", "core", "pod")
+		if err != nil {
+			t.Fatalf("Objects(alpha, core, pod) again: %v", err)
 		}
-	}
-	for _, badKind := range []string{"", "Pod", "a.b", "a/b"} {
-		if _, err := m.Objects("alpha", "core", badKind); !errors.Is(err, keyspace.ErrInvalid) {
-			t.Fatalf("Objects(kind=%q) err = %v, want keyspace.ErrInvalid", badKind, err)
+		if c1 != c1Again {
+			t.Fatal("expected same *Cache for identical (tenant, group, kind)")
 		}
-	}
+
+		otherTriples := [][3]string{
+			{"beta", "core", "pod"},
+			{"alpha", "apps.example.com", "pod"},
+			{"alpha", "core", "service"},
+		}
+		for _, tr := range otherTriples {
+			c, err := m.Objects(tr[0], tr[1], tr[2])
+			if err != nil {
+				t.Fatalf("Objects(%v): %v", tr, err)
+			}
+			if c == c1 {
+				t.Fatalf("Objects(%v) returned same *Cache as (alpha, core, pod)", tr)
+			}
+		}
+
+		for _, badTenant := range []string{"", "BAD", "-a", "a/b"} {
+			if _, err := m.Objects(badTenant, "core", "pod"); !errors.Is(err, tenant.ErrInvalidName) {
+				t.Fatalf("Objects(tenant=%q) err = %v, want tenant.ErrInvalidName", badTenant, err)
+			}
+		}
+		for _, badGroup := range []string{"", "apps", "CORE", "a/b"} {
+			if _, err := m.Objects("alpha", badGroup, "pod"); !errors.Is(err, keyspace.ErrInvalid) {
+				t.Fatalf("Objects(group=%q) err = %v, want keyspace.ErrInvalid", badGroup, err)
+			}
+		}
+		for _, badKind := range []string{"", "Pod", "a.b", "a/b"} {
+			if _, err := m.Objects("alpha", "core", badKind); !errors.Is(err, keyspace.ErrInvalid) {
+				t.Fatalf("Objects(kind=%q) err = %v, want keyspace.ErrInvalid", badKind, err)
+			}
+		}
+	})
 }
 
 func TestManagerConcurrentObjects(t *testing.T) {
-	ms := memstore.New()
-	m, err := watchcache.NewManager(ms, shortConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	t.Cleanup(m.Close)
-
-	const n = 16
-	caches := make([]*watchcache.Cache, n)
-	errs := make([]error, n)
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := range n {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			<-start
-			caches[idx], errs[idx] = m.Objects("alpha", "core", "pod")
-		}(i)
-	}
-	close(start)
-	wg.Wait()
-
-	for i := range n {
-		if errs[i] != nil {
-			t.Fatalf("goroutine %d Objects err = %v", i, errs[i])
+	synctest.Test(t, func(t *testing.T) {
+		ms := memstore.New()
+		m, err := watchcache.NewManager(ms, shortConfig())
+		if err != nil {
+			t.Fatalf("NewManager: %v", err)
 		}
-		if caches[i] == nil || caches[i] != caches[0] {
-			t.Fatalf("goroutine %d got %p, want %p", i, caches[i], caches[0])
+		t.Cleanup(m.Close)
+
+		const n = 16
+		caches := make([]*watchcache.Cache, n)
+		errs := make([]error, n)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range n {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				<-start
+				caches[idx], errs[idx] = m.Objects("alpha", "core", "pod")
+			}(i)
 		}
-	}
+		close(start)
+		wg.Wait()
+
+		for i := range n {
+			if errs[i] != nil {
+				t.Fatalf("goroutine %d Objects err = %v", i, errs[i])
+			}
+			if caches[i] == nil || caches[i] != caches[0] {
+				t.Fatalf("goroutine %d got %p, want %p", i, caches[i], caches[0])
+			}
+		}
+	})
 }
 
 func TestManagerTenantIsolationAndRelativeKeys(t *testing.T) {
-	ms := memstore.New()
-	m, err := watchcache.NewManager(ms, shortConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	t.Cleanup(m.Close)
+	synctest.Test(t, func(t *testing.T) {
+		ms := memstore.New()
+		m, err := watchcache.NewManager(ms, shortConfig())
+		if err != nil {
+			t.Fatalf("NewManager: %v", err)
+		}
+		t.Cleanup(m.Close)
 
-	alphaCache, err := m.Objects("alpha", "core", "pod")
-	if err != nil {
-		t.Fatalf("Objects(alpha): %v", err)
-	}
-	betaCache, err := m.Objects("beta", "core", "pod")
-	if err != nil {
-		t.Fatalf("Objects(beta): %v", err)
-	}
-	waitReady(t, alphaCache)
-	waitReady(t, betaCache)
+		alphaCache, err := m.Objects("alpha", "core", "pod")
+		if err != nil {
+			t.Fatalf("Objects(alpha): %v", err)
+		}
+		betaCache, err := m.Objects("beta", "core", "pod")
+		if err != nil {
+			t.Fatalf("Objects(beta): %v", err)
+		}
+		waitReady(t, alphaCache)
+		waitReady(t, betaCache)
 
-	prefix, err := keyspace.ObjectPrefix("core", "pod")
-	if err != nil {
-		t.Fatalf("ObjectPrefix: %v", err)
-	}
+		prefix, err := keyspace.ObjectPrefix("core", "pod")
+		if err != nil {
+			t.Fatalf("ObjectPrefix: %v", err)
+		}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	betaWatch, err := betaCache.Watch(ctx, prefix, watchcache.WatchOptions{FromRev: 0})
-	if err != nil {
-		t.Fatalf("beta Watch: %v", err)
-	}
+		betaWatch, err := betaCache.Watch(ctx, prefix, watchcache.WatchOptions{FromRev: 0})
+		if err != nil {
+			t.Fatalf("beta Watch: %v", err)
+		}
 
-	absAlpha, relAlpha := mustObjectKey(t, "alpha", "core", "pod", "web")
-	mustTxn(t, ms, putOp(absAlpha, "alpha-val"))
+		absAlpha, relAlpha := mustObjectKey(t, "alpha", "core", "pod", "web")
+		mustTxn(t, ms, putOp(absAlpha, "alpha-val"))
 
-	kv, _, err := alphaCache.Get(ctx, relAlpha, 0)
-	if err != nil {
-		t.Fatalf("alpha Get(%q): %v", relAlpha, err)
-	}
-	if kv.Key != relAlpha || string(kv.Value) != "alpha-val" {
-		t.Fatalf("alpha Get = %+v, want key=%q val=alpha-val", kv, relAlpha)
-	}
-	parsed, err := keyspace.ParseRel("alpha", kv.Key)
-	if err != nil || parsed.Family != keyspace.FamilyObject || parsed.Object.Name != "web" {
-		t.Fatalf("ParseRel(alpha, %q) = (%+v, %v)", kv.Key, parsed, err)
-	}
+		kv, _, err := alphaCache.Get(ctx, relAlpha, 0)
+		if err != nil {
+			t.Fatalf("alpha Get(%q): %v", relAlpha, err)
+		}
+		if kv.Key != relAlpha || string(kv.Value) != "alpha-val" {
+			t.Fatalf("alpha Get = %+v, want key=%q val=alpha-val", kv, relAlpha)
+		}
+		parsed, err := keyspace.ParseRel("alpha", kv.Key)
+		if err != nil || parsed.Family != keyspace.FamilyObject || parsed.Object.Name != "web" {
+			t.Fatalf("ParseRel(alpha, %q) = (%+v, %v)", kv.Key, parsed, err)
+		}
 
-	if _, _, err := betaCache.Get(ctx, relAlpha, 0); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("beta Get(%q) err = %v, want ErrNotFound", relAlpha, err)
-	}
-	betaKVs, _, _, err := betaCache.Range(ctx, prefix, 0, 0, "")
-	if err != nil || len(betaKVs) != 0 {
-		t.Fatalf("beta Range = (%v, %v), want empty", betaKVs, err)
-	}
+		if _, _, err := betaCache.Get(ctx, relAlpha, 0); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("beta Get(%q) err = %v, want ErrNotFound", relAlpha, err)
+		}
+		betaKVs, _, _, err := betaCache.Range(ctx, prefix, 0, 0, "")
+		if err != nil || len(betaKVs) != 0 {
+			t.Fatalf("beta Range = (%v, %v), want empty", betaKVs, err)
+		}
 
-	absBeta, relBeta := mustObjectKey(t, "beta", "core", "pod", "db")
-	rBeta := mustTxn(t, ms, putOp(absBeta, "beta-val"))
+		absBeta, relBeta := mustObjectKey(t, "beta", "core", "pod", "db")
+		rBeta := mustTxn(t, ms, putOp(absBeta, "beta-val"))
 
-	ev, ok := nextChange(t, betaWatch, 2*time.Second)
-	if !ok {
-		t.Fatalf("beta Watch closed unexpectedly: %v", betaWatch.Err())
-	}
-	if ev.Type != watchcache.EventPut || ev.Rev != rBeta || ev.Key != relBeta || string(ev.Value) != "beta-val" {
-		t.Fatalf("beta Watch got unexpected event %+v, want Put %q@%d", ev, relBeta, rBeta)
-	}
-	if _, err := keyspace.ParseRel("beta", ev.Key); err != nil {
-		t.Fatalf("ParseRel(beta, %q): %v", ev.Key, err)
-	}
+		ev, ok := nextChange(t, betaWatch, 2*time.Second)
+		if !ok {
+			t.Fatalf("beta Watch closed unexpectedly: %v", betaWatch.Err())
+		}
+		if ev.Type != watchcache.EventPut || ev.Rev != rBeta || ev.Key != relBeta || string(ev.Value) != "beta-val" {
+			t.Fatalf("beta Watch got unexpected event %+v, want Put %q@%d", ev, relBeta, rBeta)
+		}
+		if _, err := keyspace.ParseRel("beta", ev.Key); err != nil {
+			t.Fatalf("ParseRel(beta, %q): %v", ev.Key, err)
+		}
+	})
 }
 
 func TestManagerCompaction(t *testing.T) {
-	checkManagerCompaction(t, memstoreFactory, noFallbackOpts().cfg, 2*time.Second)
+	synctest.Test(t, func(t *testing.T) {
+		checkManagerCompaction(t, memstoreFactory, noFallbackOpts().cfg, 2*time.Second)
+	})
 }
 
 func checkManagerCompaction(t *testing.T, newStore func(*testing.T) store.Store, baseCfg watchcache.Config, timeout time.Duration) {
@@ -331,9 +340,11 @@ func checkManagerCompaction(t *testing.T, newStore func(*testing.T) store.Store,
 }
 
 func TestManagerCompactLaggingCache(t *testing.T) {
-	cfg := shortConfig()
-	cfg.ReadWait = 100 * time.Millisecond
-	checkManagerLaggingCache(t, memstoreFactory, cfg, 2*time.Second)
+	synctest.Test(t, func(t *testing.T) {
+		cfg := shortConfig()
+		cfg.ReadWait = 100 * time.Millisecond
+		checkManagerLaggingCache(t, memstoreFactory, cfg, 2*time.Second)
+	})
 }
 
 func checkManagerLaggingCache(t *testing.T, newStore func(*testing.T) store.Store, cfg watchcache.Config, timeout time.Duration) {
@@ -342,6 +353,7 @@ func checkManagerLaggingCache(t *testing.T, newStore func(*testing.T) store.Stor
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	t.Cleanup(src.wait)
 	t.Cleanup(m.Close)
 
 	ctx := context.Background()
@@ -402,164 +414,176 @@ func checkManagerLaggingCache(t *testing.T, newStore func(*testing.T) store.Stor
 }
 
 func TestManagerCompactBoundAndListing(t *testing.T) {
-	ms := memstore.New()
-	src := newTestSource(ms)
-	cfg := shortConfig()
-	cfg.ReadWait = 5 * time.Second
+	synctest.Test(t, func(t *testing.T) {
+		ms := memstore.New()
+		src := newTestSource(ms)
+		cfg := shortConfig()
+		cfg.ReadWait = 5 * time.Second
 
-	m1, err := watchcache.NewManager(src, cfg)
-	if err != nil {
-		t.Fatalf("NewManager m1: %v", err)
-	}
-	src.setBlockRange(true)
-	if _, err := m1.Objects("pending-only", "core", "pod"); err != nil {
+		m1, err := watchcache.NewManager(src, cfg)
+		if err != nil {
+			t.Fatalf("NewManager m1: %v", err)
+		}
+		src.setBlockRange(true)
+		if _, err := m1.Objects("pending-only", "core", "pod"); err != nil {
+			src.setBlockRange(false)
+			m1.Close()
+			src.wait()
+			t.Fatalf("Objects(pending-only): %v", err)
+		}
+		if bound, ok := m1.CompactBound(); ok {
+			src.setBlockRange(false)
+			m1.Close()
+			src.wait()
+			t.Fatalf("CompactBound while only cache is listing = (%d, true), want (0, false)", bound)
+		}
+
+		ctx := context.Background()
+		absAlpha, _ := mustObjectKey(t, "alpha", "core", "pod", "p1")
+		r1 := mustTxn(t, ms, putOp(absAlpha, "v0"))
+
+		start := time.Now()
+		if compacted, err := m1.Compact(ctx, r1); err != nil || compacted != r1 {
+			src.setBlockRange(false)
+			m1.Close()
+			src.wait()
+			t.Fatalf("Compact with only listing cache = (%d, %v), want (%d, nil)", compacted, err, r1)
+		}
+		if elapsed := time.Since(start); elapsed >= cfg.ReadWait/2 {
+			src.setBlockRange(false)
+			m1.Close()
+			src.wait()
+			t.Fatalf("Compact with only listing cache took %v, expected well under ReadWait %v", elapsed, cfg.ReadWait)
+		}
+
+		start = time.Now()
+		if _, err := m1.Compact(ctx, r1+100); !errors.Is(err, store.ErrFutureRev) {
+			src.setBlockRange(false)
+			m1.Close()
+			src.wait()
+			t.Fatalf("Compact(future) err = %v, want ErrFutureRev", err)
+		}
+		if elapsed := time.Since(start); elapsed >= cfg.ReadWait/2 {
+			src.setBlockRange(false)
+			m1.Close()
+			src.wait()
+			t.Fatalf("Compact(future) took %v, expected well under ReadWait %v", elapsed, cfg.ReadWait)
+		}
 		src.setBlockRange(false)
 		m1.Close()
-		t.Fatalf("Objects(pending-only): %v", err)
-	}
-	if bound, ok := m1.CompactBound(); ok {
-		src.setBlockRange(false)
-		m1.Close()
-		t.Fatalf("CompactBound while only cache is listing = (%d, true), want (0, false)", bound)
-	}
+		src.wait()
 
-	ctx := context.Background()
-	absAlpha, _ := mustObjectKey(t, "alpha", "core", "pod", "p1")
-	r1 := mustTxn(t, ms, putOp(absAlpha, "v0"))
+		ms2 := memstore.New()
+		src2 := newTestSource(ms2)
+		m2, err := watchcache.NewManager(src2, cfg)
+		if err != nil {
+			t.Fatalf("NewManager m2: %v", err)
+		}
+		t.Cleanup(src2.wait)
+		t.Cleanup(m2.Close)
 
-	start := time.Now()
-	if compacted, err := m1.Compact(ctx, r1); err != nil || compacted != r1 {
-		src.setBlockRange(false)
-		m1.Close()
-		t.Fatalf("Compact with only listing cache = (%d, %v), want (%d, nil)", compacted, err, r1)
-	}
-	if elapsed := time.Since(start); elapsed >= cfg.ReadWait/2 {
-		src.setBlockRange(false)
-		m1.Close()
-		t.Fatalf("Compact with only listing cache took %v, expected well under ReadWait %v", elapsed, cfg.ReadWait)
-	}
+		rBase := mustTxn(t, ms2, putOp(absAlpha, "v0"))
+		c1, err := m2.Objects("alpha", "core", "pod")
+		if err != nil {
+			t.Fatalf("Objects(alpha): %v", err)
+		}
+		c2, err := m2.Objects("beta", "core", "pod")
+		if err != nil {
+			t.Fatalf("Objects(beta): %v", err)
+		}
+		waitReady(t, c1)
+		waitReady(t, c2)
 
-	start = time.Now()
-	if _, err := m1.Compact(ctx, r1+100); !errors.Is(err, store.ErrFutureRev) {
-		src.setBlockRange(false)
-		m1.Close()
-		t.Fatalf("Compact(future) err = %v, want ErrFutureRev", err)
-	}
-	if elapsed := time.Since(start); elapsed >= cfg.ReadWait/2 {
-		src.setBlockRange(false)
-		m1.Close()
-		t.Fatalf("Compact(future) took %v, expected well under ReadWait %v", elapsed, cfg.ReadWait)
-	}
-	src.setBlockRange(false)
-	m1.Close()
+		// Two writes to alpha close rA1 in c1 without sending anything to idle c2.
+		rA1 := mustTxn(t, ms2, putOp(absAlpha, "v1"))
+		rA2 := mustTxn(t, ms2, putOp(absAlpha, "v2"))
+		waitUntil(t, 2*time.Second, func() bool {
+			cr, ok := c1.ClosedRev()
+			return ok && cr >= rA1
+		}, "c1 ClosedRev did not advance")
 
-	ms2 := memstore.New()
-	src2 := newTestSource(ms2)
-	m2, err := watchcache.NewManager(src2, cfg)
-	if err != nil {
-		t.Fatalf("NewManager m2: %v", err)
-	}
-	t.Cleanup(m2.Close)
+		closed2, ok := c2.ClosedRev()
+		if !ok || closed2 != rBase {
+			t.Fatalf("c2 ClosedRev = (%d, %v), want (%d, true)", closed2, ok, rBase)
+		}
+		if bound, ok := m2.CompactBound(); !ok || bound != rBase {
+			t.Fatalf("CompactBound with lagging idle c2 = (%d, %v), want (%d, true)", bound, ok, rBase)
+		}
 
-	rBase := mustTxn(t, ms2, putOp(absAlpha, "v0"))
-	c1, err := m2.Objects("alpha", "core", "pod")
-	if err != nil {
-		t.Fatalf("Objects(alpha): %v", err)
-	}
-	c2, err := m2.Objects("beta", "core", "pod")
-	if err != nil {
-		t.Fatalf("Objects(beta): %v", err)
-	}
-	waitReady(t, c1)
-	waitReady(t, c2)
+		src2.setBlockRange(true)
+		defer src2.setBlockRange(false)
+		cListing, err := m2.Objects("listing", "core", "pod")
+		if err != nil {
+			t.Fatalf("Objects(listing): %v", err)
+		}
+		if _, ok := cListing.ClosedRev(); ok {
+			t.Fatal("expected listing cache ClosedRev to be false")
+		}
+		if bound, ok := m2.CompactBound(); !ok || bound != rBase {
+			t.Fatalf("CompactBound with listing cache = (%d, %v), want (%d, true)", bound, ok, rBase)
+		}
 
-	// Two writes to alpha close rA1 in c1 without sending anything to idle c2.
-	rA1 := mustTxn(t, ms2, putOp(absAlpha, "v1"))
-	rA2 := mustTxn(t, ms2, putOp(absAlpha, "v2"))
-	waitUntil(t, 2*time.Second, func() bool {
-		cr, ok := c1.ClosedRev()
-		return ok && cr >= rA1
-	}, "c1 ClosedRev did not advance")
+		start = time.Now()
+		if compacted, err := m2.Compact(ctx, rA2); err != nil || compacted != rA2 {
+			t.Fatalf("Compact with listing cache = (%d, %v), want (%d, nil)", compacted, err, rA2)
+		}
+		if elapsed := time.Since(start); elapsed >= cfg.ReadWait/2 {
+			t.Fatalf("Compact with listing cache took %v, expected well under ReadWait %v", elapsed, cfg.ReadWait)
+		}
 
-	closed2, ok := c2.ClosedRev()
-	if !ok || closed2 != rBase {
-		t.Fatalf("c2 ClosedRev = (%d, %v), want (%d, true)", closed2, ok, rBase)
-	}
-	if bound, ok := m2.CompactBound(); !ok || bound != rBase {
-		t.Fatalf("CompactBound with lagging idle c2 = (%d, %v), want (%d, true)", bound, ok, rBase)
-	}
-
-	src2.setBlockRange(true)
-	defer src2.setBlockRange(false)
-	cListing, err := m2.Objects("listing", "core", "pod")
-	if err != nil {
-		t.Fatalf("Objects(listing): %v", err)
-	}
-	if _, ok := cListing.ClosedRev(); ok {
-		t.Fatal("expected listing cache ClosedRev to be false")
-	}
-	if bound, ok := m2.CompactBound(); !ok || bound != rBase {
-		t.Fatalf("CompactBound with listing cache = (%d, %v), want (%d, true)", bound, ok, rBase)
-	}
-
-	start = time.Now()
-	if compacted, err := m2.Compact(ctx, rA2); err != nil || compacted != rA2 {
-		t.Fatalf("Compact with listing cache = (%d, %v), want (%d, nil)", compacted, err, rA2)
-	}
-	if elapsed := time.Since(start); elapsed >= cfg.ReadWait/2 {
-		t.Fatalf("Compact with listing cache took %v, expected well under ReadWait %v", elapsed, cfg.ReadWait)
-	}
-
-	start = time.Now()
-	if _, err := m2.Compact(ctx, rA2+100); !errors.Is(err, store.ErrFutureRev) {
-		t.Fatalf("m2 Compact(future) err = %v, want ErrFutureRev", err)
-	}
-	if elapsed := time.Since(start); elapsed >= cfg.ReadWait/2 {
-		t.Fatalf("m2 Compact(future) took %v, expected well under ReadWait %v", elapsed, cfg.ReadWait)
-	}
+		start = time.Now()
+		if _, err := m2.Compact(ctx, rA2+100); !errors.Is(err, store.ErrFutureRev) {
+			t.Fatalf("m2 Compact(future) err = %v, want ErrFutureRev", err)
+		}
+		if elapsed := time.Since(start); elapsed >= cfg.ReadWait/2 {
+			t.Fatalf("m2 Compact(future) took %v, expected well under ReadWait %v", elapsed, cfg.ReadWait)
+		}
+	})
 }
 
 func TestManagerClose(t *testing.T) {
-	baseGoroutines := cacheGoroutines()
+	synctest.Test(t, func(t *testing.T) {
+		baseGoroutines := cacheGoroutines()
 
-	ms := memstore.New()
-	m, err := watchcache.NewManager(ms, shortConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+		ms := memstore.New()
+		m, err := watchcache.NewManager(ms, shortConfig())
+		if err != nil {
+			t.Fatalf("NewManager: %v", err)
+		}
 
-	c1, err := m.Objects("alpha", "core", "pod")
-	if err != nil {
-		t.Fatalf("Objects(alpha): %v", err)
-	}
-	c2, err := m.Objects("beta", "core", "pod")
-	if err != nil {
-		t.Fatalf("Objects(beta): %v", err)
-	}
-	waitReady(t, c1)
-	waitReady(t, c2)
+		c1, err := m.Objects("alpha", "core", "pod")
+		if err != nil {
+			t.Fatalf("Objects(alpha): %v", err)
+		}
+		c2, err := m.Objects("beta", "core", "pod")
+		if err != nil {
+			t.Fatalf("Objects(beta): %v", err)
+		}
+		waitReady(t, c1)
+		waitReady(t, c2)
 
-	m.Close()
-	m.Close()
+		m.Close()
+		m.Close()
 
-	ctx := context.Background()
-	if _, _, err := c1.Get(ctx, "o/core/pod/x", 0); !errors.Is(err, watchcache.ErrClosed) {
-		t.Fatalf("c1 Get after Manager.Close err = %v, want ErrClosed", err)
-	}
-	if _, _, err := c2.Get(ctx, "o/core/pod/x", 0); !errors.Is(err, watchcache.ErrClosed) {
-		t.Fatalf("c2 Get after Manager.Close err = %v, want ErrClosed", err)
-	}
-	if _, err := m.Objects("gamma", "core", "pod"); !errors.Is(err, watchcache.ErrClosed) {
-		t.Fatalf("Objects after Close err = %v, want ErrClosed", err)
-	}
-	if _, err := m.Compact(ctx, 1); !errors.Is(err, watchcache.ErrClosed) {
-		t.Fatalf("Compact after Close err = %v, want ErrClosed", err)
-	}
-	if _, ok := m.CompactBound(); ok {
-		t.Fatal("CompactBound after Close should be false")
-	}
+		ctx := context.Background()
+		if _, _, err := c1.Get(ctx, "o/core/pod/x", 0); !errors.Is(err, watchcache.ErrClosed) {
+			t.Fatalf("c1 Get after Manager.Close err = %v, want ErrClosed", err)
+		}
+		if _, _, err := c2.Get(ctx, "o/core/pod/x", 0); !errors.Is(err, watchcache.ErrClosed) {
+			t.Fatalf("c2 Get after Manager.Close err = %v, want ErrClosed", err)
+		}
+		if _, err := m.Objects("gamma", "core", "pod"); !errors.Is(err, watchcache.ErrClosed) {
+			t.Fatalf("Objects after Close err = %v, want ErrClosed", err)
+		}
+		if _, err := m.Compact(ctx, 1); !errors.Is(err, watchcache.ErrClosed) {
+			t.Fatalf("Compact after Close err = %v, want ErrClosed", err)
+		}
+		if _, ok := m.CompactBound(); ok {
+			t.Fatal("CompactBound after Close should be false")
+		}
 
-	waitUntil(t, 2*time.Second, func() bool {
-		return cacheGoroutines() <= baseGoroutines
-	}, "goroutine count did not return to baseline after Manager.Close")
+		waitUntil(t, 2*time.Second, func() bool {
+			return cacheGoroutines() <= baseGoroutines
+		}, "goroutine count did not return to baseline after Manager.Close")
+	})
 }

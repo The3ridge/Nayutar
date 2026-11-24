@@ -1,6 +1,6 @@
 ---
 title: すべての外部作用をシミュレーション用インターフェース経由とし、gosim 評価後にシミュレータを選ぶ
-status: proposed
+status: accepted
 date: 2026-11-17
 depends-on: ["0002", "0003"]
 ---
@@ -23,10 +23,10 @@ depends-on: ["0002", "0003"]
 
 ## 根拠（調査結果・出典）
 
-- **`testing/synctest` の仕様と限界**：Go 1.24 で `GOEXPERIMENT=synctest` として実験導入され、Go 1.25 で一般提供になったことを確認した（`https://go.dev/doc/go1.25`）。公式解説（`https://go.dev/blog/synctest`）によれば、バブル内の全ゴルーチンが durably blocked になると偽時計が進むが、「Real network and file I/O do not durably block」であるため、`net.Pipe` などのインメモリ偽実装が別途必須になる。また単一プロセス内の単体・結合試験向けであり、複数ノード・分断・時計ずれを含む系全体の単一シード再現にはイベントキュー基盤が要る。
-- **`gosim` の現状**：`https://github.com/jellevandenhooff/gosim` は、決定論的なゴルーチン・スケジューリング、模擬時刻、模擬 TCP ネットワーク・ファイルシステムにより複数マシン分の Go コードを単一プロセスで動かせるが、experimental と明記されていることを確認した。またランタイムフックが Go バージョン別（Go 1.23〜1.26 用を確認）であり、Go 1.27 での動作は未確認である。このため評価なしの先行採用は避ける。
-- **決定論的シミュレーションの先行事例と線形化可能性**：FoundationDB（`https://apple.github.io/foundationdb/testing.html`）、TigerBeetle VOPR（`https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/internals/vopr.md`）、Antithesis（`https://antithesis.com/docs/`）が同型の先例として存在する（所在のみ確認しており、各資料の詳細精読は G0 で行うため現時点では未確認である）。線形化可能性検査の候補には `porcupine` v1.3.1（Go、`https://github.com/anishathalye/porcupine`）がある。
-- **数値の位置づけ**：同一シード 100 回の一致、G0 第 2〜3 週での `gosim` 評価、マージ後 200 シード・夜間 10,000 シード・G1 10,000 シード、および決定性未達 6 週での撤退基準は、本 ADR が置く初期値とする。
+- **`testing/synctest` と `math/rand/v2.ChaCha8` の仕様**：`testing/synctest` は Go 1.24 で `GOEXPERIMENT=synctest` として実験導入され、Go 1.25 で一般提供、Go 1.26 で旧実験 API 削除、Go 1.27（2026-08-19）で `synctest.Sleep` とインメモリ偽ネットワーク既定の `httptest.NewTestServer` が追加されたことを確認した（`https://go.dev/doc/go1.25`、`https://go.dev/doc/go1.26`、`https://go.dev/doc/go1.27`）。公式解説（`https://go.dev/blog/synctest`、`https://pkg.go.dev/testing/synctest`）によれば、バブル内の全ゴルーチンが durably blocked になると偽時計が進むが、「Real network and file I/O do not durably block」であるため、`net.Pipe` などのインメモリ偽実装が必須になり、またゴルーチン実行順自体は決定論化しないため系全体の単一シード再現にはイベントキュー基盤が要る。乱数については C2SP 仕様（`https://c2sp.org/chacha8rand`）準拠の `math/rand/v2.ChaCha8` がアーキテクチャ・将来 Go 版を跨ぐビット一致の `Uint64` 列を保証することを確認した。
+- **`gosim` の現状と [[0032]] での評価結果**：`https://github.com/jellevandenhooff/gosim`（MIT、SemVer タグ未発行）は実験的段階と明記されており、2026-11-24 時点で上流および継続保守フォーク `https://github.com/neria-cloud/gosim`（Go 1.25 / 1.26 系のみ対応）のいずれも Go 1.27（`go 1.27.3`）に未対応で、Go 1.27 への移植フォーク `https://github.com/djosh34/gosim` も Go 1.27.4 のみの対応であり、いずれも AST 変換と Go マイナー版別ランタイムフックに依存することを確認した。これを受け [[0032]] で `gosim` 不採用（自作 `core/sim` 採用）を決定した。
+- **決定論的シミュレーションの先行事例と線形化可能性**：FoundationDB（`https://apple.github.io/foundationdb/testing.html`、Apache-2.0、単一スレッド離散イベントループ `Sim2`・`INetwork`・`IAsyncFile`・`deterministicRandom`・`BUGGIFY`）および TigerBeetle VOPR（`https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/internals/vopr.md`、Apache-2.0、単一スレッド離散イベント駆動と Swarm Testing）がいずれもランタイム改変ではなく明示的 I/O 境界の差し替えと単一シード PRNG で系全体シミュレーションを成立させていることを確認した（クリーンルーム境界を守りコード流用は行わない）。線形化可能性検査には `porcupine` v1.3.1（MIT、`https://github.com/anishathalye/porcupine`、`core/store/storetest` に導入済み）を用いる。
+- **数値の位置づけ**：同一シード 100 回の一致（[[0032]] で `clustersim`・`livesim`・`nodesim` すべてで検証済み）、G0 第 2〜3 週での `gosim` 評価、マージ後 200 シード・夜間 10,000 シード・G1 10,000 シード、および決定性未達 6 週での撤退基準は、本 ADR が置く初期値とする。
 
 ## 検討した代替案
 
@@ -46,3 +46,4 @@ depends-on: ["0002", "0003"]
 
 - [[0002]]: Go 1.27.3 以上・最新 2 メジャー版追従という前提を与えた ADR。
 - [[0003]]: 実装証明の代わりにシミュレーション・DRT・外部オラクルで正しさを担保する方針を定めた ADR。
+- [[0032]]: Go 1.27.3 上での `gosim` 評価（不採用）および共通 4 インターフェース `core/sim`・離散イベントキュー・多コンポーネント結合シミュレーション `core/sim/clustersim` による本決定の実現方式を定める ADR。

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Kaikei-e/Nayutar/core/node/lifecycle"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 )
 
 // ErrAlreadyRun is returned when Runner.Run is invoked more than once.
@@ -142,7 +143,7 @@ func (r *Runner) Run(ctx context.Context) (lifecycle.State, error) {
 	}
 
 	cleanupOpCtx := func() (context.Context, context.CancelFunc) {
-		return context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout)
+		return sim.WithTimeout(context.WithoutCancel(ctx), r.clock, r.cleanupTimeout)
 	}
 
 	for st.Phase != lifecycle.PhaseStopped {

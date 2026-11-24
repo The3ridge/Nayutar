@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"hash"
 	"maps"
-	"math/rand/v2"
 	"slices"
 	"strconv"
 
@@ -18,6 +17,7 @@ import (
 	"github.com/Kaikei-e/Nayutar/core/liveness/agent"
 	"github.com/Kaikei-e/Nayutar/core/liveness/detector"
 	"github.com/Kaikei-e/Nayutar/core/liveness/hrw"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 	"github.com/Kaikei-e/Nayutar/core/store/memstore"
 )
@@ -218,7 +218,7 @@ func (h *eventHeap) pop() simEvent {
 // Sim runs a deterministic discrete-event simulation of the node liveness protocol.
 type Sim struct {
 	cfg      Config
-	rng      *rand.Rand
+	rng      sim.Rand
 	store    *memstore.Store
 	registry *liveness.Registry
 
@@ -331,7 +331,7 @@ func New(cfg Config) (*Sim, error) {
 
 	s := &Sim{
 		cfg:             cfg,
-		rng:             rand.New(rand.NewPCG(cfg.Seed, 0)),
+		rng:             sim.NewDetRand(cfg.Seed),
 		store:           st,
 		registry:        reg,
 		aggIDs:          aggIDs,
@@ -520,7 +520,7 @@ func (s *Sim) sendMessages(msgs []liveness.Message) {
 		if !s.canDeliver(m.From, m.To) {
 			continue
 		}
-		if s.cfg.Loss > 0 && (s.cfg.Loss >= 1 || s.rng.Float64() < s.cfg.Loss) {
+		if s.cfg.Loss > 0 && (s.cfg.Loss >= 1 || sim.Float64(s.rng) < s.cfg.Loss) {
 			continue
 		}
 		s.nextSeq++

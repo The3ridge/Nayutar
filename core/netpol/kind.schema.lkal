@@ -1,0 +1,84 @@
+@lkal "0.1"
+
+lkal-schema = "0.2"
+id = "nayutar:net.nayutar/networkpolicy/0.1"
+version = "0.1.0"
+doc = "Resource kind schema for net.nayutar/networkpolicy."
+
+def "port-range" {
+  type = .record
+  field "min" {
+    type = .int
+    required = true
+    min = 1
+    max = 65535
+  }
+  field "max" {
+    type = .int
+    required = true
+    min = 1
+    max = 65535
+  }
+}
+
+def "rule" {
+  type = .record
+  field "order" {
+    type = .int
+    required = true
+  }
+  field "direction" {
+    type = .enum
+    required = true
+    values = [.ingress, .egress]
+  }
+  field "peerTenant" {
+    type = .string
+    min-length = 1
+    max-length = 63
+    pattern = "[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+  }
+  field "peerCIDR" {
+    type = .string
+    min-length = 1
+  }
+  field "protocol" {
+    type = .enum
+    default = .any
+    values = [.any, .tcp, .udp, .icmp]
+  }
+  field "ports" { use = &def/port-range }
+}
+
+root {
+  field "spec" {
+    type = .record
+    required = true
+    field "intraTenant" {
+      type = .enum
+      default = .allow
+      values = [.allow, .deny]
+    }
+    field "rules" {
+      type = .map
+      unique-by = ["order"]
+      key {
+        min-length = 1
+        max-length = 63
+        pattern = "[A-Za-z0-9._-]+"
+      }
+      value { use = &def/rule }
+    }
+  }
+  field "status" {
+    type = .record
+    field "appliedGeneration" {
+      type = .int
+      min = 0
+    }
+    field "ruleCount" {
+      type = .int
+      min = 0
+    }
+  }
+}

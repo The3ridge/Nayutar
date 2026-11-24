@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -19,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Kaikei-e/LKAL"
@@ -29,6 +29,7 @@ import (
 	"github.com/Kaikei-e/Nayutar/core/resource/patch"
 	"github.com/Kaikei-e/Nayutar/core/resource/refcedar"
 	"github.com/Kaikei-e/Nayutar/core/resource/refs"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 	"github.com/Kaikei-e/Nayutar/core/store/memstore"
@@ -178,7 +179,8 @@ func (c *fixedClock) Advance(d time.Duration) {
 
 func generateLoopbackTLS(t *testing.T) (serverTLS, clientTLS *tls.Config) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rng := sim.RandReader(sim.NewDetRand(2))
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rng)
 	if err != nil {
 		t.Fatalf("generate ecdsa key: %v", err)
 	}
@@ -193,7 +195,7 @@ func generateLoopbackTLS(t *testing.T) (serverTLS, clientTLS *tls.Config) {
 		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(rng, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		t.Fatalf("create certificate: %v", err)
 	}
@@ -226,6 +228,7 @@ type testEnv struct {
 	caches  *watchcache.Manager
 	handler *wire.Handler
 	clock   *fixedClock
+	net     *sim.MemNet
 	baseURL string
 	client  *wire.Client
 	rawHC   *http.Client
@@ -282,6 +285,7 @@ func startTestEnv(t *testing.T, opts envOpts) *testEnv {
 		ScopeResolver: opts.scopeResolver,
 		Authenticate:  opts.authFn,
 		Now:           clk.Now,
+		Rand:          sim.RandReader(sim.NewDetRand(1)),
 		MaxBodyBytes:  opts.maxBodyBytes,
 		MaxListLimit:  opts.maxListLimit,
 	})
@@ -295,10 +299,11 @@ func startTestEnv(t *testing.T, opts envOpts) *testEnv {
 		h.ServeHTTP(w, r)
 	})
 
-	// Bind strictly to loopback 127.0.0.1:0.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	mn := sim.NewMemNet()
+	ln, err := mn.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen 127.0.0.1:0: %v", err)
+		_ = mn.Close()
+		t.Fatalf("memnet listen 127.0.0.1:0: %v", err)
 	}
 	srv := &http.Server{Handler: wrapped}
 
@@ -312,12 +317,12 @@ func startTestEnv(t *testing.T, opts envOpts) *testEnv {
 		wire.ConfigureServer(srv, false)
 		go func() { _ = srv.ServeTLS(ln, "", "") }()
 		baseURL = "https://" + ln.Addr().String()
-		client = wire.NewTLSClient(baseURL, cliTLS)
+		client = wire.NewTLSClientWithNet(baseURL, cliTLS, mn)
 	} else {
 		wire.ConfigureServer(srv, true)
 		go func() { _ = srv.Serve(ln) }()
 		baseURL = "http://" + ln.Addr().String()
-		client = wire.NewH2CClient(baseURL)
+		client = wire.NewH2CClientWithNet(baseURL, mn)
 	}
 
 	t.Cleanup(func() {
@@ -325,6 +330,7 @@ func startTestEnv(t *testing.T, opts envOpts) *testEnv {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutCancel()
 		_ = srv.Shutdown(shutCtx)
+		_ = mn.Close()
 	})
 
 	return &testEnv{
@@ -333,6 +339,7 @@ func startTestEnv(t *testing.T, opts envOpts) *testEnv {
 		caches:  caches,
 		handler: h,
 		clock:   clk,
+		net:     mn,
 		baseURL: baseURL,
 		client:  client,
 		rawHC:   client.HTTPClient(),
@@ -578,7 +585,7 @@ func TestHTTP2CRUDPatchListWatch(t *testing.T) {
 		{name: "tls_h2", useTLS: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runProtocolSuite(t, tc.useTLS)
+			synctest.Test(t, func(t *testing.T) { runProtocolSuite(t, tc.useTLS) })
 		})
 	}
 }
@@ -941,545 +948,556 @@ func runProtocolSuite(t *testing.T, useTLS bool) {
 }
 
 func TestWatchNameFilterAndBookmarks(t *testing.T) {
-	env := startTestEnv(t, envOpts{
-		cacheCfg: watchcache.Config{
-			ProgressInterval: 10 * time.Millisecond,
-			BookmarkInterval: 30 * time.Millisecond,
-			ReadWait:         time.Second,
-		},
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		env := startTestEnv(t, envOpts{
+			cacheCfg: watchcache.Config{
+				ProgressInterval: 10 * time.Millisecond,
+				BookmarkInterval: 30 * time.Millisecond,
+				ReadWait:         time.Second,
+			},
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	for _, nm := range []string{"web", "web2", "web-staging"} {
-		if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc(nm, 1)); err != nil {
-			t.Fatalf("Create(%s): %v", nm, err)
+		for _, nm := range []string{"web", "web2", "web-staging"} {
+			if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc(nm, 1)); err != nil {
+				t.Fatalf("Create(%s): %v", nm, err)
+			}
 		}
-	}
 
-	wCtx, cancelW := context.WithCancel(ctx)
-	defer cancelW()
-	ws, err := env.client.Watch(wCtx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{
-		SendInitialEvents: true,
-		Name:              "web",
-	})
-	if err != nil {
-		t.Fatalf("Watch(name=web): %v", err)
-	}
-	defer func() { _ = ws.Close() }()
-
-	var gotInit []string
-	for {
-		ev, ok := ws.Next()
-		if !ok {
-			t.Fatalf("watch ended early: %v", ws.Err())
+		wCtx, cancelW := context.WithCancel(ctx)
+		defer cancelW()
+		ws, err := env.client.Watch(wCtx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{
+			SendInitialEvents: true,
+			Name:              "web",
+		})
+		if err != nil {
+			t.Fatalf("Watch(name=web): %v", err)
 		}
-		if ev.Type == wire.EventPut {
-			m, _ := getRecord(*ev.Object, "meta")
-			gotInit = append(gotInit, getString(m, "name"))
-		} else if ev.Type == wire.EventBookmark && ev.InitialEventsEnd {
-			break
-		}
-	}
-	if strings.Join(gotInit, ",") != "web" {
-		t.Fatalf("name filter initial events = %v, want [web]", gotInit)
-	}
+		defer func() { _ = ws.Close() }()
 
-	// Mutate prefix-colliding names web2 & web-staging, then mutate and delete web.
-	for _, nm := range []string{"web2", "web-staging"} {
-		obj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: nm}
-		if _, err := env.client.Patch(ctx, "acme", obj, []patch.Op{
-			{Kind: patch.OpSet, Path: "spec/replicas", Value: lkal.Int(9)},
+		var gotInit []string
+		for {
+			ev, ok := ws.Next()
+			if !ok {
+				t.Fatalf("watch ended early: %v", ws.Err())
+			}
+			if ev.Type == wire.EventPut {
+				m, _ := getRecord(*ev.Object, "meta")
+				gotInit = append(gotInit, getString(m, "name"))
+			} else if ev.Type == wire.EventBookmark && ev.InitialEventsEnd {
+				break
+			}
+		}
+		if strings.Join(gotInit, ",") != "web" {
+			t.Fatalf("name filter initial events = %v, want [web]", gotInit)
+		}
+
+		// Mutate prefix-colliding names web2 & web-staging, then mutate and delete web.
+		for _, nm := range []string{"web2", "web-staging"} {
+			obj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: nm}
+			if _, err := env.client.Patch(ctx, "acme", obj, []patch.Op{
+				{Kind: patch.OpSet, Path: "spec/replicas", Value: lkal.Int(9)},
+			}); err != nil {
+				t.Fatalf("Patch(%s): %v", nm, err)
+			}
+			if err := env.client.Delete(ctx, "acme", obj, 0); err != nil {
+				t.Fatalf("Delete(%s): %v", nm, err)
+			}
+		}
+		webObj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "web"}
+		if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
+			{Kind: patch.OpSet, Path: "spec/replicas", Value: lkal.Int(4)},
 		}); err != nil {
-			t.Fatalf("Patch(%s): %v", nm, err)
+			t.Fatalf("Patch(web): %v", err)
 		}
-		if err := env.client.Delete(ctx, "acme", obj, 0); err != nil {
-			t.Fatalf("Delete(%s): %v", nm, err)
+		if err := env.client.Delete(ctx, "acme", webObj, 0); err != nil {
+			t.Fatalf("Delete(web): %v", err)
 		}
-	}
-	webObj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "web"}
-	if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
-		{Kind: patch.OpSet, Path: "spec/replicas", Value: lkal.Int(4)},
-	}); err != nil {
-		t.Fatalf("Patch(web): %v", err)
-	}
-	if err := env.client.Delete(ctx, "acme", webObj, 0); err != nil {
-		t.Fatalf("Delete(web): %v", err)
-	}
 
-	sawPut, sawDel, sawBM := false, false, false
-	for !sawPut || !sawDel || !sawBM {
-		ev, ok := ws.Next()
-		if !ok {
-			t.Fatalf("watch ended early: %v", ws.Err())
+		sawPut, sawDel, sawBM := false, false, false
+		for !sawPut || !sawDel || !sawBM {
+			ev, ok := ws.Next()
+			if !ok {
+				t.Fatalf("watch ended early: %v", ws.Err())
+			}
+			switch ev.Type {
+			case wire.EventPut:
+				m, _ := getRecord(*ev.Object, "meta")
+				if nm := getString(m, "name"); nm != "web" {
+					t.Fatalf("name filter leaked Put for %q", nm)
+				}
+				sawPut = true
+			case wire.EventDelete:
+				if ev.Target == nil || ev.Target.Name != "web" {
+					t.Fatalf("name filter leaked Delete for %+v", ev.Target)
+				}
+				sawDel = true
+			case wire.EventBookmark:
+				if !ev.InitialEventsEnd {
+					sawBM = true
+				}
+			}
 		}
-		switch ev.Type {
-		case wire.EventPut:
-			m, _ := getRecord(*ev.Object, "meta")
-			if nm := getString(m, "name"); nm != "web" {
-				t.Fatalf("name filter leaked Put for %q", nm)
-			}
-			sawPut = true
-		case wire.EventDelete:
-			if ev.Target == nil || ev.Target.Name != "web" {
-				t.Fatalf("name filter leaked Delete for %+v", ev.Target)
-			}
-			sawDel = true
-		case wire.EventBookmark:
-			if !ev.InitialEventsEnd {
-				sawBM = true
-			}
-		}
-	}
+	})
 }
 
 func TestWatchGoneInitialAndMidStream(t *testing.T) {
-	env := startTestEnv(t, envOpts{
-		cacheCfg: watchcache.Config{
-			MinEvents:        2,
-			MaxEvents:        4,
-			MinAge:           time.Nanosecond,
-			ProgressInterval: 5 * time.Millisecond,
-			BookmarkInterval: time.Hour,
-			ReadWait:         200 * time.Millisecond,
-		},
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		env := startTestEnv(t, envOpts{
+			cacheCfg: watchcache.Config{
+				MinEvents:        2,
+				MaxEvents:        4,
+				MinAge:           time.Nanosecond,
+				ProgressInterval: 5 * time.Millisecond,
+				BookmarkInterval: time.Hour,
+				ReadWait:         200 * time.Millisecond,
+			},
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
 
-	// Create and warm the cache.
-	created, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc("web", 1))
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	m, _ := getRecord(created, "meta")
-	firstRev := store.Rev(getInt(m, "revision"))
-	webObj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "web"}
+		// Create and warm the cache.
+		created, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc("web", 1))
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		m, _ := getRecord(created, "meta")
+		firstRev := store.Rev(getInt(m, "revision"))
+		webObj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "web"}
 
-	if _, err := env.client.Get(ctx, "acme", webObj, 0); err != nil {
-		t.Fatalf("warm cache Get: %v", err)
-	}
+		if _, err := env.client.Get(ctx, "acme", webObj, 0); err != nil {
+			t.Fatalf("warm cache Get: %v", err)
+		}
 
-	// Produce > MaxEvents mutations so firstRev is evicted from ring and compacted.
-	var latestRev store.Rev
-	for i := int64(2); i <= 10; i++ {
-		updated, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
-			{Kind: patch.OpSet, Path: "spec/replicas", Value: lkal.Int(i)},
+		// Produce > MaxEvents mutations so firstRev is evicted from ring and compacted.
+		var latestRev store.Rev
+		for i := int64(2); i <= 10; i++ {
+			updated, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
+				{Kind: patch.OpSet, Path: "spec/replicas", Value: lkal.Int(i)},
+			})
+			if err != nil {
+				t.Fatalf("Patch %d: %v", i, err)
+			}
+			um, _ := getRecord(updated, "meta")
+			latestRev = store.Rev(getInt(um, "revision"))
+		}
+		if _, err := env.caches.Compact(ctx, latestRev); err != nil {
+			t.Fatalf("Manager.Compact: %v", err)
+		}
+
+		// Pre-stream Watch from evicted/compacted rev -> HTTP 410 Gone.
+		if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{FromRev: firstRev}); !errors.Is(err, wire.ErrGone) {
+			t.Fatalf("Watch(old rev) err = %v, want ErrGone", err)
+		} else {
+			var we *wire.Error
+			if !errors.As(err, &we) || we.Status != http.StatusGone {
+				t.Fatalf("expected 410 *wire.Error, got %+v", we)
+			}
+		}
+
+		// Historical Get at compacted rev -> HTTP 410 Gone.
+		if _, err := env.client.Get(ctx, "acme", webObj, firstRev); !errors.Is(err, wire.ErrGone) {
+			t.Fatalf("Get(compacted rev) err = %v, want ErrGone", err)
+		}
+
+		// Future revision Watch -> 422 Unprocessable Content.
+		if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{FromRev: latestRev + 1000}); !errors.Is(err, wire.ErrUnprocessable) {
+			t.Fatalf("Watch(future rev) err = %v, want ErrUnprocessable", err)
+		}
+
+		// Mid-stream .gone terminal error when watcher lags behind MaxEvents.
+		// Use a client with small HTTP/2 receive window and large payloads so server writes stall
+		// while the cache ring evicts the watcher's cursor.
+		var h2cProto http.Protocols
+		h2cProto.SetUnencryptedHTTP2(true)
+		slowClient := wire.NewClient(env.baseURL, &http.Client{
+			Transport: &http.Transport{
+				DialContext: env.net.DialContext,
+				Protocols:   &h2cProto,
+				HTTP2: &http.HTTP2Config{
+					MaxReceiveBufferPerStream:     64 << 10,
+					MaxReceiveBufferPerConnection: 64 << 10,
+				},
+			},
+		})
+		defer slowClient.CloseIdleConnections()
+
+		wCtx, cancelW := context.WithCancel(ctx)
+		defer cancelW()
+		slowStream, err := slowClient.Watch(wCtx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{
+			SendInitialEvents: true,
 		})
 		if err != nil {
-			t.Fatalf("Patch %d: %v", i, err)
+			t.Fatalf("slow Watch: %v", err)
 		}
-		um, _ := getRecord(updated, "meta")
-		latestRev = store.Rev(getInt(um, "revision"))
-	}
-	if _, err := env.caches.Compact(ctx, latestRev); err != nil {
-		t.Fatalf("Manager.Compact: %v", err)
-	}
+		defer func() { _ = slowStream.Close() }()
 
-	// Pre-stream Watch from evicted/compacted rev -> HTTP 410 Gone.
-	if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{FromRev: firstRev}); !errors.Is(err, wire.ErrGone) {
-		t.Fatalf("Watch(old rev) err = %v, want ErrGone", err)
-	} else {
-		var we *wire.Error
-		if !errors.As(err, &we) || we.Status != http.StatusGone {
-			t.Fatalf("expected 410 *wire.Error, got %+v", we)
+		// Drain initial events until InitialEventsEnd so the watch stream is live.
+		for {
+			ev, ok := slowStream.Next()
+			if !ok {
+				t.Fatalf("slowStream ended during initial state: %v", slowStream.Err())
+			}
+			if ev.Type == wire.EventBookmark && ev.InitialEventsEnd {
+				break
+			}
 		}
-	}
 
-	// Historical Get at compacted rev -> HTTP 410 Gone.
-	if _, err := env.client.Get(ctx, "acme", webObj, firstRev); !errors.Is(err, wire.ErrGone) {
-		t.Fatalf("Get(compacted rev) err = %v, want ErrGone", err)
-	}
+		// Pause reading slowStream while writing large updates exceeding both the HTTP/2 stream window and MaxEvents.
+		big := strings.Repeat("x", 32<<10)
+		for i := 0; i < 20; i++ {
+			if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
+				{Kind: patch.OpSet, Path: "spec/payload", Value: lkal.String(fmt.Sprintf("%02d-%s", i, big))},
+			}); err != nil {
+				t.Fatalf("burst Patch %d: %v", i, err)
+			}
+			// Ensure cache syncLoop advances through each revision.
+			if _, err := env.client.Get(ctx, "acme", webObj, 0); err != nil {
+				t.Fatalf("sync Get %d: %v", i, err)
+			}
+		}
 
-	// Future revision Watch -> 422 Unprocessable Content.
-	if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{FromRev: latestRev + 1000}); !errors.Is(err, wire.ErrUnprocessable) {
-		t.Fatalf("Watch(future rev) err = %v, want ErrUnprocessable", err)
-	}
+		// Now drain slowStream; it must terminate with wire.ErrGone from the terminal .error NDJSON event.
+		for {
+			_, ok := slowStream.Next()
+			if !ok {
+				break
+			}
+		}
+		if !errors.Is(slowStream.Err(), wire.ErrGone) {
+			t.Fatalf("lagging watcher Err = %v, want wire.ErrGone", slowStream.Err())
+		}
 
-	// Mid-stream .gone terminal error when watcher lags behind MaxEvents.
-	// Use a client with small HTTP/2 receive window and large payloads so server writes stall
-	// while the cache ring evicts the watcher's cursor.
-	var h2cProto http.Protocols
-	h2cProto.SetUnencryptedHTTP2(true)
-	slowClient := wire.NewClient(env.baseURL, &http.Client{
-		Transport: &http.Transport{
-			Protocols: &h2cProto,
-			HTTP2: &http.HTTP2Config{
-				MaxReceiveBufferPerStream:     64 << 10,
-				MaxReceiveBufferPerConnection: 64 << 10,
-			},
-		},
+		// Closed watchcache manager -> 503 Service Unavailable.
+		env.caches.Close()
+		if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{}); !errors.Is(err, wire.ErrUnavailable) {
+			t.Fatalf("Watch(closed manager) err = %v, want ErrUnavailable", err)
+		}
 	})
-	defer slowClient.CloseIdleConnections()
-
-	wCtx, cancelW := context.WithCancel(ctx)
-	defer cancelW()
-	slowStream, err := slowClient.Watch(wCtx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{
-		SendInitialEvents: true,
-	})
-	if err != nil {
-		t.Fatalf("slow Watch: %v", err)
-	}
-	defer func() { _ = slowStream.Close() }()
-
-	// Drain initial events until InitialEventsEnd so the watch stream is live.
-	for {
-		ev, ok := slowStream.Next()
-		if !ok {
-			t.Fatalf("slowStream ended during initial state: %v", slowStream.Err())
-		}
-		if ev.Type == wire.EventBookmark && ev.InitialEventsEnd {
-			break
-		}
-	}
-
-	// Pause reading slowStream while writing large updates exceeding both the HTTP/2 stream window and MaxEvents.
-	big := strings.Repeat("x", 32<<10)
-	for i := 0; i < 20; i++ {
-		if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
-			{Kind: patch.OpSet, Path: "spec/payload", Value: lkal.String(fmt.Sprintf("%02d-%s", i, big))},
-		}); err != nil {
-			t.Fatalf("burst Patch %d: %v", i, err)
-		}
-		// Ensure cache syncLoop advances through each revision.
-		if _, err := env.client.Get(ctx, "acme", webObj, 0); err != nil {
-			t.Fatalf("sync Get %d: %v", i, err)
-		}
-	}
-
-	// Now drain slowStream; it must terminate with wire.ErrGone from the terminal .error NDJSON event.
-	for {
-		_, ok := slowStream.Next()
-		if !ok {
-			break
-		}
-	}
-	if !errors.Is(slowStream.Err(), wire.ErrGone) {
-		t.Fatalf("lagging watcher Err = %v, want wire.ErrGone", slowStream.Err())
-	}
-
-	// Closed watchcache manager -> 503 Service Unavailable.
-	env.caches.Close()
-	if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{}); !errors.Is(err, wire.ErrUnavailable) {
-		t.Fatalf("Watch(closed manager) err = %v, want ErrUnavailable", err)
-	}
 }
 
 func TestAuthAndCedarRefAuthorization(t *testing.T) {
-	ps, err := cedar.NewPolicySetFromBytes("policy.cedar", []byte(`
-permit(
-  principal == Nayutar::User::"alice",
-  action == Nayutar::Action::"Reference",
-  resource
-) when {
-  context.tenant == "acme" && resource.kind == "secret"
-};
-`))
-	if err != nil {
-		t.Fatalf("parse cedar policy: %v", err)
-	}
-	authz, err := refcedar.New(ps, nil)
-	if err != nil {
-		t.Fatalf("refcedar.New: %v", err)
-	}
-
-	authFn := func(r *http.Request) (refs.Principal, error) {
-		switch r.Header.Get("X-Test-User") {
-		case "alice":
-			return refs.Principal{Type: "Nayutar::User", ID: "alice"}, nil
-		case "bob":
-			return refs.Principal{Type: "Nayutar::User", ID: "bob"}, nil
-		default:
-			return refs.Principal{}, errors.New("missing or invalid token")
+	synctest.Test(t, func(t *testing.T) {
+		ps, err := cedar.NewPolicySetFromBytes("policy.cedar", []byte(`
+	permit(
+	  principal == Nayutar::User::"alice",
+	  action == Nayutar::Action::"Reference",
+	  resource
+	) when {
+	  context.tenant == "acme" && resource.kind == "secret"
+	};
+	`))
+		if err != nil {
+			t.Fatalf("parse cedar policy: %v", err)
 		}
-	}
+		authz, err := refcedar.New(ps, nil)
+		if err != nil {
+			t.Fatalf("refcedar.New: %v", err)
+		}
 
-	env := startTestEnv(t, envOpts{
-		authFn:     authFn,
-		authorizer: authz,
+		authFn := func(r *http.Request) (refs.Principal, error) {
+			switch r.Header.Get("X-Test-User") {
+			case "alice":
+				return refs.Principal{Type: "Nayutar::User", ID: "alice"}, nil
+			case "bob":
+				return refs.Principal{Type: "Nayutar::User", ID: "bob"}, nil
+			default:
+				return refs.Principal{}, errors.New("missing or invalid token")
+			}
+		}
+
+		env := startTestEnv(t, envOpts{
+			authFn:     authFn,
+			authorizer: authz,
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Unauthenticated requests -> 401 Unauthorized on reads, writes, and watches.
+		if _, err := env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{}); !errors.Is(err, wire.ErrUnauthorized) {
+			t.Fatalf("unauth List err = %v, want ErrUnauthorized", err)
+		}
+		if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{}); !errors.Is(err, wire.ErrUnauthorized) {
+			t.Fatalf("unauth Watch err = %v, want ErrUnauthorized", err)
+		}
+		if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc("w", 1)); !errors.Is(err, wire.ErrUnauthorized) {
+			t.Fatalf("unauth Create err = %v, want ErrUnauthorized", err)
+		}
+
+		var currentUser string
+		env.client.BeforeRequest = func(req *http.Request) {
+			if currentUser != "" {
+				req.Header.Set("X-Test-User", currentUser)
+			}
+		}
+
+		// Alice creates secret/db and workload/web.
+		currentUser = "alice"
+		secretDoc := rec(
+			fld("meta", rec(fld("kind", lkal.String("secret")), fld("name", lkal.String("db")))),
+			fld("spec", rec(fld("data", lkal.String("pw")))),
+		)
+		if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "secret", secretDoc); err != nil {
+			t.Fatalf("Create secret: %v", err)
+		}
+		if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc("web", 1)); err != nil {
+			t.Fatalf("Create workload: %v", err)
+		}
+		webObj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "web"}
+
+		// Bob tries to patch a reference to secret/db -> Cedar denies -> 403 Forbidden.
+		currentUser = "bob"
+		if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
+			{Kind: patch.OpSet, Path: "spec/secretRef", Value: lkal.Ref{"secret", "db"}},
+		}); !errors.Is(err, wire.ErrForbidden) {
+			t.Fatalf("bob Patch ref err = %v, want ErrForbidden", err)
+		}
+
+		// Alice tries to reference disallowed target kind -> 422 ErrRefKind.
+		currentUser = "alice"
+		if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
+			{Kind: patch.OpSet, Path: "spec/secretRef", Value: lkal.Ref{"workload", "web"}},
+		}); !errors.Is(err, wire.ErrRefKind) {
+			t.Fatalf("alice Patch wrong ref kind err = %v, want ErrRefKind", err)
+		}
+
+		// Alice tries to reference missing secret -> 422 ErrRefNotFound (Cedar permits? Wait: resource.kind doesn't exist when target absent -> denied! Check missing secret with policy allowing missing target or check allowed target).
+		// Alice references existing secret/db -> succeeds!
+		if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
+			{Kind: patch.OpSet, Path: "spec/secretRef", Value: lkal.Ref{"secret", "db"}},
+		}); err != nil {
+			t.Fatalf("alice Patch allowed ref: %v", err)
+		}
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Unauthenticated requests -> 401 Unauthorized on reads, writes, and watches.
-	if _, err := env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{}); !errors.Is(err, wire.ErrUnauthorized) {
-		t.Fatalf("unauth List err = %v, want ErrUnauthorized", err)
-	}
-	if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{}); !errors.Is(err, wire.ErrUnauthorized) {
-		t.Fatalf("unauth Watch err = %v, want ErrUnauthorized", err)
-	}
-	if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc("w", 1)); !errors.Is(err, wire.ErrUnauthorized) {
-		t.Fatalf("unauth Create err = %v, want ErrUnauthorized", err)
-	}
-
-	var currentUser string
-	env.client.BeforeRequest = func(req *http.Request) {
-		if currentUser != "" {
-			req.Header.Set("X-Test-User", currentUser)
-		}
-	}
-
-	// Alice creates secret/db and workload/web.
-	currentUser = "alice"
-	secretDoc := rec(
-		fld("meta", rec(fld("kind", lkal.String("secret")), fld("name", lkal.String("db")))),
-		fld("spec", rec(fld("data", lkal.String("pw")))),
-	)
-	if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "secret", secretDoc); err != nil {
-		t.Fatalf("Create secret: %v", err)
-	}
-	if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc("web", 1)); err != nil {
-		t.Fatalf("Create workload: %v", err)
-	}
-	webObj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "web"}
-
-	// Bob tries to patch a reference to secret/db -> Cedar denies -> 403 Forbidden.
-	currentUser = "bob"
-	if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
-		{Kind: patch.OpSet, Path: "spec/secretRef", Value: lkal.Ref{"secret", "db"}},
-	}); !errors.Is(err, wire.ErrForbidden) {
-		t.Fatalf("bob Patch ref err = %v, want ErrForbidden", err)
-	}
-
-	// Alice tries to reference disallowed target kind -> 422 ErrRefKind.
-	currentUser = "alice"
-	if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
-		{Kind: patch.OpSet, Path: "spec/secretRef", Value: lkal.Ref{"workload", "web"}},
-	}); !errors.Is(err, wire.ErrRefKind) {
-		t.Fatalf("alice Patch wrong ref kind err = %v, want ErrRefKind", err)
-	}
-
-	// Alice tries to reference missing secret -> 422 ErrRefNotFound (Cedar permits? Wait: resource.kind doesn't exist when target absent -> denied! Check missing secret with policy allowing missing target or check allowed target).
-	// Alice references existing secret/db -> succeeds!
-	if _, err := env.client.Patch(ctx, "acme", webObj, []patch.Op{
-		{Kind: patch.OpSet, Path: "spec/secretRef", Value: lkal.Ref{"secret", "db"}},
-	}); err != nil {
-		t.Fatalf("alice Patch allowed ref: %v", err)
-	}
 }
 
 func TestRefNotFoundErrorMapping(t *testing.T) {
-	ps, err := cedar.NewPolicySetFromBytes("allow-all.cedar", []byte(`
-permit(principal, action == Nayutar::Action::"Reference", resource);
-`))
-	if err != nil {
-		t.Fatalf("parse policy: %v", err)
-	}
-	authz, err := refcedar.New(ps, nil)
-	if err != nil {
-		t.Fatalf("refcedar.New: %v", err)
-	}
-	env := startTestEnv(t, envOpts{
-		authorizer: authz,
-		authFn: func(*http.Request) (refs.Principal, error) {
-			return refs.Principal{Type: "Nayutar::User", ID: "alice"}, nil
-		},
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ps, err := cedar.NewPolicySetFromBytes("allow-all.cedar", []byte(`
+	permit(principal, action == Nayutar::Action::"Reference", resource);
+	`))
+		if err != nil {
+			t.Fatalf("parse policy: %v", err)
+		}
+		authz, err := refcedar.New(ps, nil)
+		if err != nil {
+			t.Fatalf("refcedar.New: %v", err)
+		}
+		env := startTestEnv(t, envOpts{
+			authorizer: authz,
+			authFn: func(*http.Request) (refs.Principal, error) {
+				return refs.Principal{Type: "Nayutar::User", ID: "alice"}, nil
+			},
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	doc := rec(
-		fld("meta", rec(fld("kind", lkal.String("workload")), fld("name", lkal.String("web")))),
-		fld("spec", rec(fld("secretRef", lkal.Ref{"secret", "missing"}))),
-	)
-	if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", doc); !errors.Is(err, wire.ErrRefNotFound) {
-		t.Fatalf("Create with missing ref err = %v, want ErrRefNotFound", err)
-	}
+		doc := rec(
+			fld("meta", rec(fld("kind", lkal.String("workload")), fld("name", lkal.String("web")))),
+			fld("spec", rec(fld("secretRef", lkal.Ref{"secret", "missing"}))),
+		)
+		if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", doc); !errors.Is(err, wire.ErrRefNotFound) {
+			t.Fatalf("Create with missing ref err = %v, want ErrRefNotFound", err)
+		}
+	})
 }
 
 func TestProtocolHardeningAndHeaders(t *testing.T) {
-	env := startTestEnv(t, envOpts{maxBodyBytes: 256})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		env := startTestEnv(t, envOpts{maxBodyBytes: 256})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	doRaw := func(method, path string, headers map[string]string, body []byte) (*http.Response, []byte) {
-		t.Helper()
-		var r io.Reader
-		if body != nil {
-			r = bytes.NewReader(body)
+		doRaw := func(method, path string, headers map[string]string, body []byte) (*http.Response, []byte) {
+			t.Helper()
+			var r io.Reader
+			if body != nil {
+				r = bytes.NewReader(body)
+			}
+			req, err := http.NewRequestWithContext(ctx, method, env.baseURL+path, r)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			for k, v := range headers {
+				req.Header.Set(k, v)
+			}
+			resp, err := env.rawHC.Do(req)
+			if err != nil {
+				t.Fatalf("Do(%s %s): %v", method, path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.ProtoMajor != 2 {
+				t.Fatalf("expected HTTP/2, got HTTP/%d", resp.ProtoMajor)
+			}
+			assertSecurityHeaders(t, resp.Header)
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("ReadAll: %v", err)
+			}
+			return resp, data
 		}
-		req, err := http.NewRequestWithContext(ctx, method, env.baseURL+path, r)
-		if err != nil {
-			t.Fatalf("NewRequest: %v", err)
-		}
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		resp, err := env.rawHC.Do(req)
-		if err != nil {
-			t.Fatalf("Do(%s %s): %v", method, path, err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.ProtoMajor != 2 {
-			t.Fatalf("expected HTTP/2, got HTTP/%d", resp.ProtoMajor)
-		}
-		assertSecurityHeaders(t, resp.Header)
-		data, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("ReadAll: %v", err)
-		}
-		return resp, data
-	}
 
-	// 405 Method Not Allowed with exact Allow & Accept-Patch headers (including TRACE).
-	resp, data := doRaw(http.MethodTrace, "/t/acme/o/core/workload", nil, nil)
-	if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "GET, POST" || resp.Header.Get("Accept-Patch") != "" {
-		t.Fatalf("TRACE collection: status=%d Allow=%q Accept-Patch=%q body=%s", resp.StatusCode, resp.Header.Get("Allow"), resp.Header.Get("Accept-Patch"), data)
-	}
-	resp, _ = doRaw(http.MethodPost, "/t/acme/o/core/workload/web", nil, nil)
-	if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "GET, PUT, PATCH, DELETE" || resp.Header.Get("Accept-Patch") != wire.MediaTypePatch {
-		t.Fatalf("POST object: status=%d Allow=%q Accept-Patch=%q", resp.StatusCode, resp.Header.Get("Allow"), resp.Header.Get("Accept-Patch"))
-	}
-	resp, _ = doRaw(http.MethodGet, "/t/acme/o/core/workload/web/status", nil, nil)
-	if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "PUT, PATCH" || resp.Header.Get("Accept-Patch") != wire.MediaTypePatch {
-		t.Fatalf("GET status: status=%d Allow=%q Accept-Patch=%q", resp.StatusCode, resp.Header.Get("Allow"), resp.Header.Get("Accept-Patch"))
-	}
-	resp, _ = doRaw(http.MethodTrace, "/unknown", nil, nil)
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("TRACE unknown: status=%d, want 405", resp.StatusCode)
-	}
+		// 405 Method Not Allowed with exact Allow & Accept-Patch headers (including TRACE).
+		resp, data := doRaw(http.MethodTrace, "/t/acme/o/core/workload", nil, nil)
+		if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "GET, POST" || resp.Header.Get("Accept-Patch") != "" {
+			t.Fatalf("TRACE collection: status=%d Allow=%q Accept-Patch=%q body=%s", resp.StatusCode, resp.Header.Get("Allow"), resp.Header.Get("Accept-Patch"), data)
+		}
+		resp, _ = doRaw(http.MethodPost, "/t/acme/o/core/workload/web", nil, nil)
+		if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "GET, PUT, PATCH, DELETE" || resp.Header.Get("Accept-Patch") != wire.MediaTypePatch {
+			t.Fatalf("POST object: status=%d Allow=%q Accept-Patch=%q", resp.StatusCode, resp.Header.Get("Allow"), resp.Header.Get("Accept-Patch"))
+		}
+		resp, _ = doRaw(http.MethodGet, "/t/acme/o/core/workload/web/status", nil, nil)
+		if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "PUT, PATCH" || resp.Header.Get("Accept-Patch") != wire.MediaTypePatch {
+			t.Fatalf("GET status: status=%d Allow=%q Accept-Patch=%q", resp.StatusCode, resp.Header.Get("Allow"), resp.Header.Get("Accept-Patch"))
+		}
+		resp, _ = doRaw(http.MethodTrace, "/unknown", nil, nil)
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("TRACE unknown: status=%d, want 405", resp.StatusCode)
+		}
 
-	// 406 Not Acceptable negotiation (RFC 9110 §12.5.1).
-	for _, badAccept := range []string{
-		"application/cbor",
-		"text/plain",
-		wire.MediaTypeResource + ";q=0",
-		wire.MediaTypeResource + ";q=0, */*;q=1",
-		"*/*;q=0",
-		"application/*;q=0",
-		wire.MediaTypeResource + ";version=2",
-	} {
-		resp, data := doRaw(http.MethodGet, "/t/acme/o/core/workload", map[string]string{"Accept": badAccept}, nil)
-		if resp.StatusCode != http.StatusNotAcceptable {
-			t.Fatalf("Accept=%q -> status %d (%s), want 406", badAccept, resp.StatusCode, data)
+		// 406 Not Acceptable negotiation (RFC 9110 §12.5.1).
+		for _, badAccept := range []string{
+			"application/cbor",
+			"text/plain",
+			wire.MediaTypeResource + ";q=0",
+			wire.MediaTypeResource + ";q=0, */*;q=1",
+			"*/*;q=0",
+			"application/*;q=0",
+			wire.MediaTypeResource + ";version=2",
+		} {
+			resp, data := doRaw(http.MethodGet, "/t/acme/o/core/workload", map[string]string{"Accept": badAccept}, nil)
+			if resp.StatusCode != http.StatusNotAcceptable {
+				t.Fatalf("Accept=%q -> status %d (%s), want 406", badAccept, resp.StatusCode, data)
+			}
+			we, err := wire.DecodeError(data)
+			if err != nil || !errors.Is(we, wire.ErrNotAcceptable) {
+				t.Fatalf("Accept=%q decode err=%v we=%+v", badAccept, err, we)
+			}
 		}
-		we, err := wire.DecodeError(data)
-		if err != nil || !errors.Is(we, wire.ErrNotAcceptable) {
-			t.Fatalf("Accept=%q decode err=%v we=%+v", badAccept, err, we)
+		for _, goodAccept := range []string{
+			"",
+			"*/*",
+			"application/*",
+			wire.MediaTypeResource,
+			wire.MediaTypeResource + "; charset=utf-8",
+			"application/cbor, " + wire.MediaTypeResource + ";q=0.5",
+		} {
+			hdr := map[string]string{}
+			if goodAccept != "" {
+				hdr["Accept"] = goodAccept
+			}
+			resp, data := doRaw(http.MethodGet, "/t/acme/o/core/workload", hdr, nil)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("Accept=%q -> status %d (%s), want 200", goodAccept, resp.StatusCode, data)
+			}
 		}
-	}
-	for _, goodAccept := range []string{
-		"",
-		"*/*",
-		"application/*",
-		wire.MediaTypeResource,
-		wire.MediaTypeResource + "; charset=utf-8",
-		"application/cbor, " + wire.MediaTypeResource + ";q=0.5",
-	} {
-		hdr := map[string]string{}
-		if goodAccept != "" {
-			hdr["Accept"] = goodAccept
-		}
-		resp, data := doRaw(http.MethodGet, "/t/acme/o/core/workload", hdr, nil)
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("Accept=%q -> status %d (%s), want 200", goodAccept, resp.StatusCode, data)
-		}
-	}
 
-	// 415 Unsupported Media Type (including Accept-Patch on patchable routes).
-	validCand, _ := resource.Encode(workloadDoc("web", 1))
-	validPatch, _ := patch.Encode([]patch.Op{})
-	for _, ct := range []string{"", "application/json", wire.MediaTypePatch, wire.MediaTypeResource + "; charset=latin1", wire.MediaTypeResource + "; foo=bar"} {
-		hdr := map[string]string{}
-		if ct != "" {
-			hdr["Content-Type"] = ct
+		// 415 Unsupported Media Type (including Accept-Patch on patchable routes).
+		validCand, _ := resource.Encode(workloadDoc("web", 1))
+		validPatch, _ := patch.Encode([]patch.Op{})
+		for _, ct := range []string{"", "application/json", wire.MediaTypePatch, wire.MediaTypeResource + "; charset=latin1", wire.MediaTypeResource + "; foo=bar"} {
+			hdr := map[string]string{}
+			if ct != "" {
+				hdr["Content-Type"] = ct
+			}
+			resp, _ := doRaw(http.MethodPost, "/t/acme/o/core/workload", hdr, validCand)
+			if resp.StatusCode != http.StatusUnsupportedMediaType {
+				t.Fatalf("POST Content-Type=%q -> %d, want 415", ct, resp.StatusCode)
+			}
 		}
-		resp, _ := doRaw(http.MethodPost, "/t/acme/o/core/workload", hdr, validCand)
-		if resp.StatusCode != http.StatusUnsupportedMediaType {
-			t.Fatalf("POST Content-Type=%q -> %d, want 415", ct, resp.StatusCode)
+		resp, _ = doRaw(http.MethodPatch, "/t/acme/o/core/workload/web", map[string]string{"Content-Type": wire.MediaTypeResource}, validPatch)
+		if resp.StatusCode != http.StatusUnsupportedMediaType || resp.Header.Get("Accept-Patch") != wire.MediaTypePatch {
+			t.Fatalf("PATCH wrong CT -> status=%d Accept-Patch=%q", resp.StatusCode, resp.Header.Get("Accept-Patch"))
 		}
-	}
-	resp, _ = doRaw(http.MethodPatch, "/t/acme/o/core/workload/web", map[string]string{"Content-Type": wire.MediaTypeResource}, validPatch)
-	if resp.StatusCode != http.StatusUnsupportedMediaType || resp.Header.Get("Accept-Patch") != wire.MediaTypePatch {
-		t.Fatalf("PATCH wrong CT -> status=%d Accept-Patch=%q", resp.StatusCode, resp.Header.Get("Accept-Patch"))
-	}
-	// Charset=utf-8 allowed on POST and PATCH.
-	resp, data = doRaw(http.MethodPost, "/t/acme/o/core/workload", map[string]string{"Content-Type": wire.MediaTypeResource + "; charset=UTF-8"}, validCand)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("POST charset=UTF-8 -> %d (%s), want 201", resp.StatusCode, data)
-	}
-	resp, data = doRaw(http.MethodPatch, "/t/acme/o/core/workload/web", map[string]string{"Content-Type": wire.MediaTypePatch + "; charset=utf-8"}, validPatch)
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("Accept-Patch") != wire.MediaTypePatch {
-		t.Fatalf("PATCH charset=utf-8 -> %d (%s), want 200", resp.StatusCode, data)
-	}
-
-	// 413 Content Too Large when exceeding MaxBodyBytes (256).
-	oversized := append([]byte(`{"$lkal":"0.1","meta":{"kind":"workload","name":"big"},"spec":{"payload":"`), bytes.Repeat([]byte("a"), 300)...)
-	oversized = append(oversized, []byte(`"}}`)...)
-	resp, data = doRaw(http.MethodPost, "/t/acme/o/core/workload", map[string]string{"Content-Type": wire.MediaTypeResource}, oversized)
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversized POST -> %d (%s), want 413", resp.StatusCode, data)
-	}
-	if we, err := wire.DecodeError(data); err != nil || !errors.Is(we, wire.ErrTooLarge) {
-		t.Fatalf("413 body decode: err=%v we=%+v", err, we)
-	}
-
-	// GET and DELETE reject non-empty bodies with 400 Bad Request.
-	resp, _ = doRaw(http.MethodGet, "/t/acme/o/core/workload/web", nil, []byte("x"))
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("GET with body -> %d, want 400", resp.StatusCode)
-	}
-	resp, _ = doRaw(http.MethodDelete, "/t/acme/o/core/workload/web", nil, []byte("x"))
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("DELETE with body -> %d, want 400", resp.StatusCode)
-	}
-
-	// Unknown query parameters rejected with 400 on every route.
-	for _, tc := range []struct {
-		method string
-		path   string
-		ct     string
-		body   []byte
-	}{
-		{http.MethodGet, "/t/acme/o/core/workload?unknown=1", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?%FF=1", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?%FF=1&%FF=2", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?atRev=%FF", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?limit=0", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?watch=true&atRev=1", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?watch=false", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?continue=", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?continue=bad/prefix", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?continue=o/core/workload/", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?continue=o/core/workload/%00", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload?continue=o/core/secret/a", "", nil},
-		{http.MethodGet, "/t/acme/o/core/workload/web?limit=1", "", nil},
-		{http.MethodPost, "/t/acme/o/core/workload?foo=bar", wire.MediaTypeResource, validCand},
-		{http.MethodPut, "/t/acme/o/core/workload/web?foo=bar", wire.MediaTypeResource, validCand},
-		{http.MethodPatch, "/t/acme/o/core/workload/web?foo=bar", wire.MediaTypePatch, validPatch},
-		{http.MethodPut, "/t/acme/o/core/workload/web/status?foo=bar", wire.MediaTypeResource, validCand},
-		{http.MethodPatch, "/t/acme/o/core/workload/web/status?foo=bar", wire.MediaTypePatch, validPatch},
-		{http.MethodDelete, "/t/acme/o/core/workload/web?foo=bar", "", nil},
-		{http.MethodDelete, "/t/acme/o/core/workload/web?rev=0", "", nil},
-	} {
-		hdr := map[string]string{}
-		if tc.ct != "" {
-			hdr["Content-Type"] = tc.ct
+		// Charset=utf-8 allowed on POST and PATCH.
+		resp, data = doRaw(http.MethodPost, "/t/acme/o/core/workload", map[string]string{"Content-Type": wire.MediaTypeResource + "; charset=UTF-8"}, validCand)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("POST charset=UTF-8 -> %d (%s), want 201", resp.StatusCode, data)
 		}
-		resp, data := doRaw(tc.method, tc.path, hdr, tc.body)
+		resp, data = doRaw(http.MethodPatch, "/t/acme/o/core/workload/web", map[string]string{"Content-Type": wire.MediaTypePatch + "; charset=utf-8"}, validPatch)
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("Accept-Patch") != wire.MediaTypePatch {
+			t.Fatalf("PATCH charset=utf-8 -> %d (%s), want 200", resp.StatusCode, data)
+		}
+
+		// 413 Content Too Large when exceeding MaxBodyBytes (256).
+		oversized := append([]byte(`{"$lkal":"0.1","meta":{"kind":"workload","name":"big"},"spec":{"payload":"`), bytes.Repeat([]byte("a"), 300)...)
+		oversized = append(oversized, []byte(`"}}`)...)
+		resp, data = doRaw(http.MethodPost, "/t/acme/o/core/workload", map[string]string{"Content-Type": wire.MediaTypeResource}, oversized)
+		if resp.StatusCode != http.StatusRequestEntityTooLarge {
+			t.Fatalf("oversized POST -> %d (%s), want 413", resp.StatusCode, data)
+		}
+		if we, err := wire.DecodeError(data); err != nil || !errors.Is(we, wire.ErrTooLarge) {
+			t.Fatalf("413 body decode: err=%v we=%+v", err, we)
+		}
+
+		// GET and DELETE reject non-empty bodies with 400 Bad Request.
+		resp, _ = doRaw(http.MethodGet, "/t/acme/o/core/workload/web", nil, []byte("x"))
 		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("%s %s -> %d (%s), want 400", tc.method, tc.path, resp.StatusCode, data)
+			t.Fatalf("GET with body -> %d, want 400", resp.StatusCode)
 		}
-		if we, err := wire.DecodeError(data); err != nil || !errors.Is(we, wire.ErrBadRequest) {
-			t.Fatalf("%s %s error decode: err=%v we=%+v", tc.method, tc.path, err, we)
+		resp, _ = doRaw(http.MethodDelete, "/t/acme/o/core/workload/web", nil, []byte("x"))
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("DELETE with body -> %d, want 400", resp.StatusCode)
 		}
-	}
 
-	// PATCH invalid JSON syntax -> 400; valid LKAL-JSON violating patch schema -> 422.
-	resp, _ = doRaw(http.MethodPatch, "/t/acme/o/core/workload/web", map[string]string{"Content-Type": wire.MediaTypePatch}, []byte(`{broken`))
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("PATCH invalid JSON -> %d, want 400", resp.StatusCode)
-	}
-	resp, _ = doRaw(http.MethodPatch, "/t/acme/o/core/workload/web", map[string]string{"Content-Type": wire.MediaTypePatch}, []byte(`{"$lkal":"0.1","wrong":{}}`))
-	if resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("PATCH bad schema -> %d, want 422", resp.StatusCode)
-	}
+		// Unknown query parameters rejected with 400 on every route.
+		for _, tc := range []struct {
+			method string
+			path   string
+			ct     string
+			body   []byte
+		}{
+			{http.MethodGet, "/t/acme/o/core/workload?unknown=1", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?%FF=1", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?%FF=1&%FF=2", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?atRev=%FF", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?limit=0", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?watch=true&atRev=1", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?watch=false", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?continue=", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?continue=bad/prefix", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?continue=o/core/workload/", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?continue=o/core/workload/%00", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload?continue=o/core/secret/a", "", nil},
+			{http.MethodGet, "/t/acme/o/core/workload/web?limit=1", "", nil},
+			{http.MethodPost, "/t/acme/o/core/workload?foo=bar", wire.MediaTypeResource, validCand},
+			{http.MethodPut, "/t/acme/o/core/workload/web?foo=bar", wire.MediaTypeResource, validCand},
+			{http.MethodPatch, "/t/acme/o/core/workload/web?foo=bar", wire.MediaTypePatch, validPatch},
+			{http.MethodPut, "/t/acme/o/core/workload/web/status?foo=bar", wire.MediaTypeResource, validCand},
+			{http.MethodPatch, "/t/acme/o/core/workload/web/status?foo=bar", wire.MediaTypePatch, validPatch},
+			{http.MethodDelete, "/t/acme/o/core/workload/web?foo=bar", "", nil},
+			{http.MethodDelete, "/t/acme/o/core/workload/web?rev=0", "", nil},
+		} {
+			hdr := map[string]string{}
+			if tc.ct != "" {
+				hdr["Content-Type"] = tc.ct
+			}
+			resp, data := doRaw(tc.method, tc.path, hdr, tc.body)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("%s %s -> %d (%s), want 400", tc.method, tc.path, resp.StatusCode, data)
+			}
+			if we, err := wire.DecodeError(data); err != nil || !errors.Is(we, wire.ErrBadRequest) {
+				t.Fatalf("%s %s error decode: err=%v we=%+v", tc.method, tc.path, err, we)
+			}
+		}
 
-	// DELETE 204 omits Content-Type and has empty body.
-	resp, data = doRaw(http.MethodDelete, "/t/acme/o/core/workload/web", nil, nil)
-	if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Content-Type") != "" || len(data) != 0 {
-		t.Fatalf("DELETE 204: status=%d CT=%q body=%q", resp.StatusCode, resp.Header.Get("Content-Type"), data)
-	}
+		// PATCH invalid JSON syntax -> 400; valid LKAL-JSON violating patch schema -> 422.
+		resp, _ = doRaw(http.MethodPatch, "/t/acme/o/core/workload/web", map[string]string{"Content-Type": wire.MediaTypePatch}, []byte(`{broken`))
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("PATCH invalid JSON -> %d, want 400", resp.StatusCode)
+		}
+		resp, _ = doRaw(http.MethodPatch, "/t/acme/o/core/workload/web", map[string]string{"Content-Type": wire.MediaTypePatch}, []byte(`{"$lkal":"0.1","wrong":{}}`))
+		if resp.StatusCode != http.StatusUnprocessableEntity {
+			t.Fatalf("PATCH bad schema -> %d, want 422", resp.StatusCode)
+		}
+
+		// DELETE 204 omits Content-Type and has empty body.
+		resp, data = doRaw(http.MethodDelete, "/t/acme/o/core/workload/web", nil, nil)
+		if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Content-Type") != "" || len(data) != 0 {
+			t.Fatalf("DELETE 204: status=%d CT=%q body=%q", resp.StatusCode, resp.Header.Get("Content-Type"), data)
+		}
+	})
 }
 
 type countingStore struct {
@@ -1499,80 +1517,82 @@ func (c *countingStore) Range(ctx context.Context, prefix string, atRev store.Re
 }
 
 func TestDoSProtectionBeforeWatchcache(t *testing.T) {
-	cs := &countingStore{Store: memstore.New()}
-	env := startTestEnv(t, envOpts{root: cs})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		cs := &countingStore{Store: memstore.New()}
+		env := startTestEnv(t, envOpts{root: cs})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	// Seed a terminating tenant directly.
-	if err := env.reg.Register(ctx, "dying"); err != nil {
-		t.Fatalf("Register(dying): %v", err)
-	}
-	_, _, err := cs.Txn(ctx, nil, []store.Op{{
-		Type:  store.OpPut,
-		Key:   "/sys/tenants/dying",
-		Value: []byte(`{"$lkal":"0.1","state":{"$enum":"terminating"}}`),
-	}})
-	if err != nil {
-		t.Fatalf("set dying terminating: %v", err)
-	}
-
-	// Unknown kind -> 404 on GET/List/Watch/Delete, 422 on POST.
-	if _, err := env.client.List(ctx, "acme", keyspace.CoreGroup, "unknownkind", resource.ListOptions{}); !errors.Is(err, wire.ErrNotFound) {
-		t.Fatalf("List unknown kind err = %v, want ErrNotFound", err)
-	}
-	if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "unknownkind", wire.WatchOptions{}); !errors.Is(err, wire.ErrNotFound) {
-		t.Fatalf("Watch unknown kind err = %v, want ErrNotFound", err)
-	}
-	if _, err := env.client.Get(ctx, "acme", keyspace.Object{Group: "core", Kind: "unknownkind", Name: "x"}, 0); !errors.Is(err, wire.ErrNotFound) {
-		t.Fatalf("Get unknown kind err = %v, want ErrNotFound", err)
-	}
-	if err := env.client.Delete(ctx, "acme", keyspace.Object{Group: "core", Kind: "unknownkind", Name: "x"}, 0); !errors.Is(err, wire.ErrNotFound) {
-		t.Fatalf("Delete unknown kind err = %v, want ErrNotFound", err)
-	}
-	unknownCand := rec(
-		fld("meta", rec(fld("kind", lkal.String("unknownkind")), fld("name", lkal.String("x")))),
-	)
-	if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "unknownkind", unknownCand); !errors.Is(err, wire.ErrUnprocessable) {
-		t.Fatalf("Create unknown kind err = %v, want ErrUnprocessable", err)
-	}
-
-	// Unknown tenant -> 404.
-	if _, err := env.client.List(ctx, "ghost", keyspace.CoreGroup, "workload", resource.ListOptions{}); !errors.Is(err, wire.ErrNotFound) {
-		t.Fatalf("List ghost tenant err = %v, want ErrNotFound", err)
-	}
-	if _, err := env.client.Watch(ctx, "ghost", keyspace.CoreGroup, "workload", wire.WatchOptions{}); !errors.Is(err, wire.ErrNotFound) {
-		t.Fatalf("Watch ghost tenant err = %v, want ErrNotFound", err)
-	}
-
-	// Terminating tenant -> 409 Conflict on reads, watches, and writes.
-	if _, err := env.client.List(ctx, "dying", keyspace.CoreGroup, "workload", resource.ListOptions{}); !errors.Is(err, wire.ErrConflict) {
-		t.Fatalf("List terminating tenant err = %v, want ErrConflict", err)
-	}
-	if _, err := env.client.Watch(ctx, "dying", keyspace.CoreGroup, "workload", wire.WatchOptions{}); !errors.Is(err, wire.ErrConflict) {
-		t.Fatalf("Watch terminating tenant err = %v, want ErrConflict", err)
-	}
-	if _, err := env.client.Create(ctx, "dying", keyspace.CoreGroup, "workload", workloadDoc("w", 1)); !errors.Is(err, wire.ErrConflict) {
-		t.Fatalf("Create terminating tenant err = %v, want ErrConflict", err)
-	}
-
-	// Malformed segments and invalid continue tokens -> 400 Bad Request without warming watchcache.
-	if _, err := env.client.List(ctx, "INVALID_TENANT", keyspace.CoreGroup, "workload", resource.ListOptions{}); !errors.Is(err, wire.ErrBadRequest) {
-		t.Fatalf("List bad tenant err = %v, want ErrBadRequest", err)
-	}
-	for _, badCont := range []string{"o/core/workload/", "o/core/workload/\x00", "o/core/secret/a", "bad/prefix"} {
-		if _, err := env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{Continue: badCont}); !errors.Is(err, wire.ErrBadRequest) {
-			t.Fatalf("List invalid continue %q err = %v, want ErrBadRequest", badCont, err)
+		// Seed a terminating tenant directly.
+		if err := env.reg.Register(ctx, "dying"); err != nil {
+			t.Fatalf("Register(dying): %v", err)
 		}
-	}
+		_, _, err := cs.Txn(ctx, nil, []store.Op{{
+			Type:  store.OpPut,
+			Key:   "/sys/tenants/dying",
+			Value: []byte(`{"$lkal":"0.1","state":{"$enum":"terminating"}}`),
+		}})
+		if err != nil {
+			t.Fatalf("set dying terminating: %v", err)
+		}
 
-	// Zero watchcache goroutines / store Range or Watch calls should have been spawned!
-	if cs.watches.Load() != 0 || cs.ranges.Load() != 0 {
-		t.Fatalf("DoS check failed: watchcache spawned store Watch=%d Range=%d calls for invalid requests", cs.watches.Load(), cs.ranges.Load())
-	}
-	if _, ok := env.caches.CompactBound(); ok {
-		t.Fatal("DoS check failed: expected no ready caches in Manager")
-	}
+		// Unknown kind -> 404 on GET/List/Watch/Delete, 422 on POST.
+		if _, err := env.client.List(ctx, "acme", keyspace.CoreGroup, "unknownkind", resource.ListOptions{}); !errors.Is(err, wire.ErrNotFound) {
+			t.Fatalf("List unknown kind err = %v, want ErrNotFound", err)
+		}
+		if _, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "unknownkind", wire.WatchOptions{}); !errors.Is(err, wire.ErrNotFound) {
+			t.Fatalf("Watch unknown kind err = %v, want ErrNotFound", err)
+		}
+		if _, err := env.client.Get(ctx, "acme", keyspace.Object{Group: "core", Kind: "unknownkind", Name: "x"}, 0); !errors.Is(err, wire.ErrNotFound) {
+			t.Fatalf("Get unknown kind err = %v, want ErrNotFound", err)
+		}
+		if err := env.client.Delete(ctx, "acme", keyspace.Object{Group: "core", Kind: "unknownkind", Name: "x"}, 0); !errors.Is(err, wire.ErrNotFound) {
+			t.Fatalf("Delete unknown kind err = %v, want ErrNotFound", err)
+		}
+		unknownCand := rec(
+			fld("meta", rec(fld("kind", lkal.String("unknownkind")), fld("name", lkal.String("x")))),
+		)
+		if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "unknownkind", unknownCand); !errors.Is(err, wire.ErrUnprocessable) {
+			t.Fatalf("Create unknown kind err = %v, want ErrUnprocessable", err)
+		}
+
+		// Unknown tenant -> 404.
+		if _, err := env.client.List(ctx, "ghost", keyspace.CoreGroup, "workload", resource.ListOptions{}); !errors.Is(err, wire.ErrNotFound) {
+			t.Fatalf("List ghost tenant err = %v, want ErrNotFound", err)
+		}
+		if _, err := env.client.Watch(ctx, "ghost", keyspace.CoreGroup, "workload", wire.WatchOptions{}); !errors.Is(err, wire.ErrNotFound) {
+			t.Fatalf("Watch ghost tenant err = %v, want ErrNotFound", err)
+		}
+
+		// Terminating tenant -> 409 Conflict on reads, watches, and writes.
+		if _, err := env.client.List(ctx, "dying", keyspace.CoreGroup, "workload", resource.ListOptions{}); !errors.Is(err, wire.ErrConflict) {
+			t.Fatalf("List terminating tenant err = %v, want ErrConflict", err)
+		}
+		if _, err := env.client.Watch(ctx, "dying", keyspace.CoreGroup, "workload", wire.WatchOptions{}); !errors.Is(err, wire.ErrConflict) {
+			t.Fatalf("Watch terminating tenant err = %v, want ErrConflict", err)
+		}
+		if _, err := env.client.Create(ctx, "dying", keyspace.CoreGroup, "workload", workloadDoc("w", 1)); !errors.Is(err, wire.ErrConflict) {
+			t.Fatalf("Create terminating tenant err = %v, want ErrConflict", err)
+		}
+
+		// Malformed segments and invalid continue tokens -> 400 Bad Request without warming watchcache.
+		if _, err := env.client.List(ctx, "INVALID_TENANT", keyspace.CoreGroup, "workload", resource.ListOptions{}); !errors.Is(err, wire.ErrBadRequest) {
+			t.Fatalf("List bad tenant err = %v, want ErrBadRequest", err)
+		}
+		for _, badCont := range []string{"o/core/workload/", "o/core/workload/\x00", "o/core/secret/a", "bad/prefix"} {
+			if _, err := env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{Continue: badCont}); !errors.Is(err, wire.ErrBadRequest) {
+				t.Fatalf("List invalid continue %q err = %v, want ErrBadRequest", badCont, err)
+			}
+		}
+
+		// Zero watchcache goroutines / store Range or Watch calls should have been spawned!
+		if cs.watches.Load() != 0 || cs.ranges.Load() != 0 {
+			t.Fatalf("DoS check failed: watchcache spawned store Watch=%d Range=%d calls for invalid requests", cs.watches.Load(), cs.ranges.Load())
+		}
+		if _, ok := env.caches.CompactBound(); ok {
+			t.Fatal("DoS check failed: expected no ready caches in Manager")
+		}
+	})
 }
 
 type failingStore struct {
@@ -1588,95 +1608,130 @@ func (f *failingStore) Get(ctx context.Context, key string, atRev store.Rev) (st
 }
 
 func TestInternalErrorRedaction(t *testing.T) {
-	fs := &failingStore{Store: memstore.New()}
-	env := startTestEnv(t, envOpts{root: fs})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		fs := &failingStore{Store: memstore.New()}
+		env := startTestEnv(t, envOpts{root: fs})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	// Write corrupt bytes directly under a valid object key.
-	corruptKey := "/t/acme/o/core/workload/corrupt-obj"
-	if _, _, err := fs.Txn(ctx, nil, []store.Op{{
-		Type:  store.OpPut,
-		Key:   corruptKey,
-		Value: []byte(`{"not":"valid lkal"}`),
-	}}); err != nil {
-		t.Fatalf("inject corrupt value: %v", err)
-	}
-
-	checkRedacted := func(label string, err error) {
-		t.Helper()
-		var we *wire.Error
-		if !errors.As(err, &we) {
-			t.Fatalf("%s: expected *wire.Error, got %T (%v)", label, err, err)
+		// Write corrupt bytes directly under a valid object key.
+		corruptKey := "/t/acme/o/core/workload/corrupt-obj"
+		if _, _, err := fs.Txn(ctx, nil, []store.Op{{
+			Type:  store.OpPut,
+			Key:   corruptKey,
+			Value: []byte(`{"not":"valid lkal"}`),
+		}}); err != nil {
+			t.Fatalf("inject corrupt value: %v", err)
 		}
-		if we.Status != http.StatusInternalServerError || we.Kind != wire.KindInternal {
-			t.Fatalf("%s: got status=%d kind=%s, want 500 internal", label, we.Status, we.Kind)
+
+		checkRedacted := func(label string, err error) {
+			t.Helper()
+			var we *wire.Error
+			if !errors.As(err, &we) {
+				t.Fatalf("%s: expected *wire.Error, got %T (%v)", label, err, err)
+			}
+			if we.Status != http.StatusInternalServerError || we.Kind != wire.KindInternal {
+				t.Fatalf("%s: got status=%d kind=%s, want 500 internal", label, we.Status, we.Kind)
+			}
+			if we.Message != "internal server error" || we.Path != "" {
+				t.Fatalf("%s: leaked internal details: msg=%q path=%q", label, we.Message, we.Path)
+			}
 		}
-		if we.Message != "internal server error" || we.Path != "" {
-			t.Fatalf("%s: leaked internal details: msg=%q path=%q", label, we.Message, we.Path)
+
+		corruptObj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "corrupt-obj"}
+		_, err := env.client.Get(ctx, "acme", corruptObj, 0)
+		checkRedacted("GET corrupt", err)
+
+		_, err = env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{})
+		checkRedacted("List corrupt", err)
+
+		_, err = env.client.Patch(ctx, "acme", corruptObj, []patch.Op{{Kind: patch.OpSet, Path: "spec/replicas", Value: lkal.Int(2)}})
+		checkRedacted("Patch corrupt", err)
+
+		// Watch encountering corrupt stored object emits terminal .error (500, redacted) and stops cleanly.
+		ws, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{SendInitialEvents: true})
+		if err != nil {
+			t.Fatalf("Watch(corrupt): %v", err)
 		}
-	}
+		defer func() { _ = ws.Close() }()
+		if ev, ok := ws.Next(); ok {
+			t.Fatalf("expected corrupt object to terminate watch with error, got event %+v", ev)
+		}
+		checkRedacted("Watch corrupt", ws.Err())
 
-	corruptObj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "corrupt-obj"}
-	_, err := env.client.Get(ctx, "acme", corruptObj, 0)
-	checkRedacted("GET corrupt", err)
-
-	_, err = env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{})
-	checkRedacted("List corrupt", err)
-
-	_, err = env.client.Patch(ctx, "acme", corruptObj, []patch.Op{{Kind: patch.OpSet, Path: "spec/replicas", Value: lkal.Int(2)}})
-	checkRedacted("Patch corrupt", err)
-
-	// Watch encountering corrupt stored object emits terminal .error (500, redacted) and stops cleanly.
-	ws, err := env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{SendInitialEvents: true})
-	if err != nil {
-		t.Fatalf("Watch(corrupt): %v", err)
-	}
-	defer func() { _ = ws.Close() }()
-	if ev, ok := ws.Next(); ok {
-		t.Fatalf("expected corrupt object to terminate watch with error, got event %+v", ev)
-	}
-	checkRedacted("Watch corrupt", ws.Err())
-
-	// Store I/O error with sensitive key path -> redacted 500.
-	fs.failReads.Store(true)
-	_, err = env.client.Update(ctx, "acme", corruptObj, workloadDoc("corrupt-obj", 2))
-	checkRedacted("PUT backend error", err)
+		// Store I/O error with sensitive key path -> redacted 500.
+		fs.failReads.Store(true)
+		_, err = env.client.Update(ctx, "acme", corruptObj, workloadDoc("corrupt-obj", 2))
+		checkRedacted("PUT backend error", err)
+	})
 }
 
 func TestClientRejectsNegativeArguments(t *testing.T) {
-	env := startTestEnv(t, envOpts{})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		env := startTestEnv(t, envOpts{})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc("keep-me", 1)); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	obj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "keep-me"}
-
-	assertBadReq := func(label string, err error) {
-		t.Helper()
-		var we *wire.Error
-		if !errors.As(err, &we) || we.Status != http.StatusBadRequest || !errors.Is(err, wire.ErrBadRequest) {
-			t.Fatalf("%s err = %v, want 400 *wire.Error(ErrBadRequest)", label, err)
+		if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc("keep-me", 1)); err != nil {
+			t.Fatalf("Create: %v", err)
 		}
-	}
+		obj := keyspace.Object{Group: keyspace.CoreGroup, Kind: "workload", Name: "keep-me"}
 
-	assertBadReq("Delete(rev=-1)", env.client.Delete(ctx, "acme", obj, -1))
-	// Object must still exist after rejected negative-rev Delete.
-	if _, err := env.client.Get(ctx, "acme", obj, 0); err != nil {
-		t.Fatalf("object was deleted by negative-rev Delete: %v", err)
-	}
+		assertBadReq := func(label string, err error) {
+			t.Helper()
+			var we *wire.Error
+			if !errors.As(err, &we) || we.Status != http.StatusBadRequest || !errors.Is(err, wire.ErrBadRequest) {
+				t.Fatalf("%s err = %v, want 400 *wire.Error(ErrBadRequest)", label, err)
+			}
+		}
 
-	_, err := env.client.Get(ctx, "acme", obj, -1)
-	assertBadReq("Get(atRev=-1)", err)
+		assertBadReq("Delete(rev=-1)", env.client.Delete(ctx, "acme", obj, -1))
+		// Object must still exist after rejected negative-rev Delete.
+		if _, err := env.client.Get(ctx, "acme", obj, 0); err != nil {
+			t.Fatalf("object was deleted by negative-rev Delete: %v", err)
+		}
 
-	_, err = env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{AtRev: -1})
-	assertBadReq("List(AtRev=-1)", err)
+		_, err := env.client.Get(ctx, "acme", obj, -1)
+		assertBadReq("Get(atRev=-1)", err)
 
-	_, err = env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{Limit: -1})
-	assertBadReq("List(Limit=-1)", err)
+		_, err = env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{AtRev: -1})
+		assertBadReq("List(AtRev=-1)", err)
 
-	_, err = env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{FromRev: -1})
-	assertBadReq("Watch(FromRev=-1)", err)
+		_, err = env.client.List(ctx, "acme", keyspace.CoreGroup, "workload", resource.ListOptions{Limit: -1})
+		assertBadReq("List(Limit=-1)", err)
+
+		_, err = env.client.Watch(ctx, "acme", keyspace.CoreGroup, "workload", wire.WatchOptions{FromRev: -1})
+		assertBadReq("Watch(FromRev=-1)", err)
+	})
+}
+
+func TestConcurrentH2CRequestsOverDelayedMemNet(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		env := startTestEnv(t, envOpts{})
+		const delay = 50 * time.Millisecond
+		const n = 4
+		env.net.SetDelay(delay)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		start := time.Now()
+		var wg sync.WaitGroup
+		for i := range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := env.client.Create(ctx, "acme", keyspace.CoreGroup, "workload", workloadDoc(fmt.Sprintf("web%d", i), 1)); err != nil {
+					t.Errorf("Create(web%d): %v", i, err)
+				}
+			}()
+		}
+		wg.Wait()
+		elapsed := time.Since(start)
+		if elapsed < 2*delay {
+			t.Fatalf("elapsed = %v, want at least one round trip (%v)", elapsed, 2*delay)
+		}
+		if elapsed > 4*delay {
+			t.Fatalf("elapsed = %v, want about one round trip, not %d serialised ones", elapsed, n)
+		}
+	})
 }

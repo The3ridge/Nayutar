@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Kaikei-e/Nayutar/core/sim"
 )
 
 var errPartitionAborted = errors.New("partition aborted")
@@ -35,6 +37,7 @@ type linkState struct {
 type peerProxy struct {
 	transport *http.Transport
 	servers   [Members]*http.Server
+	serveWG   sync.WaitGroup
 
 	mu           sync.Mutex
 	closed       bool
@@ -44,11 +47,23 @@ type peerProxy struct {
 }
 
 func newPeerProxy(listenURLs, targetURLs [Members]string) (*peerProxy, error) {
+	return newPeerProxyWithNet(listenURLs, targetURLs, nil)
+}
+
+func newPeerProxyWithNet(listenURLs, targetURLs [Members]string, netImpl sim.Net) (*peerProxy, error) {
+	dialCtx := (&net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	listenFn := func(network, addr string) (net.Listener, error) {
+		return net.Listen(network, addr)
+	}
+	if netImpl != nil {
+		dialCtx = netImpl.DialContext
+		listenFn = netImpl.Listen
+	}
 	tr := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:         dialCtx,
 		MaxIdleConnsPerHost: 16,
 		IdleConnTimeout:     90 * time.Second,
 	}
@@ -68,7 +83,7 @@ func newPeerProxy(listenURLs, targetURLs [Members]string) (*peerProxy, error) {
 			p.close()
 			return nil, fmt.Errorf("parse proxy target URL %q: %w", targetURLs[i], err)
 		}
-		ln, err := net.Listen("tcp", listenURL.Host)
+		ln, err := listenFn("tcp", listenURL.Host)
 		if err != nil {
 			p.close()
 			return nil, fmt.Errorf("listen peer proxy %d on %s: %w", i, listenURL.Host, err)
@@ -88,7 +103,9 @@ func newPeerProxy(listenURLs, targetURLs [Members]string) (*peerProxy, error) {
 			ErrorLog: log.New(io.Discard, "", 0),
 		}
 		p.servers[i] = srv
+		p.serveWG.Add(1)
 		go func() {
+			defer p.serveWG.Done()
 			_ = srv.Serve(ln)
 		}()
 	}
@@ -180,6 +197,7 @@ func (p *peerProxy) close() {
 		}
 	}
 	p.transport.CloseIdleConnections()
+	p.serveWG.Wait()
 }
 
 func isRaftPath(path string) bool {

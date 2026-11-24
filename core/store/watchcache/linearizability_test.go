@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Kaikei-e/Nayutar/core/store"
@@ -26,6 +27,9 @@ func newCacheStore(t *testing.T, inner store.Store, cfg watchcache.Config, ready
 	if err != nil {
 		t.Fatalf("watchcache.New: %v", err)
 	}
+	if ts, ok := inner.(*testSource); ok {
+		t.Cleanup(ts.wait)
+	}
 	t.Cleanup(c.Close)
 	waitReadyTimeout(t, c, readyTimeout)
 	return &cacheStore{Store: inner, cache: c}
@@ -42,30 +46,32 @@ func (s *cacheStore) Range(ctx context.Context, prefix string, atRev store.Rev, 
 }
 
 func TestLinearizability(t *testing.T) {
-	storetest.RunLinearizability(t, func(t *testing.T) store.Store {
+	storetest.RunLinearizabilitySynctest(t, func(t *testing.T) store.Store {
 		return newCacheStore(t, memstore.New(), watchcache.Config{ProgressInterval: 5 * time.Millisecond}, 2*time.Second)
 	})
 }
 
 func TestLinearizabilityServesFromCache(t *testing.T) {
-	src := newTestSource(memstore.New())
-	adapter := newCacheStore(t, src, watchcache.Config{}, 2*time.Second)
-	src.resetCounts()
+	synctest.Test(t, func(t *testing.T) {
+		src := newTestSource(memstore.New())
+		adapter := newCacheStore(t, src, watchcache.Config{}, 2*time.Second)
+		src.resetCounts()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	if err := storetest.CheckLinearizable(ctx, adapter, storetest.Workload{Clients: 8, Ops: 60, Seed: 1}); err != nil {
-		t.Fatal(err)
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := storetest.CheckLinearizable(ctx, adapter, storetest.Workload{Clients: 8, Ops: 60, Seed: 1}); err != nil {
+			t.Fatal(err)
+		}
 
-	totalReads := adapter.gets.Load() + adapter.ranges.Load()
-	fallbacks := src.gets.Load() + src.ranges.Load()
-	if totalReads == 0 {
-		t.Fatal("expected workload to issue Get/Range calls")
-	}
-	if fallbacks*20 > totalReads {
-		t.Fatalf("too many underlying store fallbacks: %d of %d reads", fallbacks, totalReads)
-	}
+		totalReads := adapter.gets.Load() + adapter.ranges.Load()
+		fallbacks := src.gets.Load() + src.ranges.Load()
+		if totalReads == 0 {
+			t.Fatal("expected workload to issue Get/Range calls")
+		}
+		if fallbacks*20 > totalReads {
+			t.Fatalf("too many underlying store fallbacks: %d of %d reads", fallbacks, totalReads)
+		}
+	})
 }
 
 type staleCacheStore struct {
@@ -109,25 +115,27 @@ func (s *staleCacheStore) Range(ctx context.Context, prefix string, atRev store.
 }
 
 func TestLinearizabilityCatchesStaleCacheReads(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
 
-	for seed := uint64(1); seed <= 20; seed++ {
-		ms := memstore.New()
-		c, err := watchcache.New(ms, "", watchcache.Config{ProgressInterval: 5 * time.Millisecond})
-		if err != nil {
-			t.Fatalf("watchcache.New: %v", err)
+		for seed := uint64(1); seed <= 20; seed++ {
+			ms := memstore.New()
+			c, err := watchcache.New(ms, "", watchcache.Config{ProgressInterval: 5 * time.Millisecond})
+			if err != nil {
+				t.Fatalf("watchcache.New: %v", err)
+			}
+			waitReady(t, c)
+			s := &staleCacheStore{Store: ms, cache: c}
+			err = storetest.CheckLinearizable(ctx, s, storetest.Workload{Clients: 8, Ops: 60, Seed: seed})
+			c.Close()
+			if errors.Is(err, storetest.ErrNotLinearizable) {
+				return
+			}
+			if err != nil {
+				t.Fatalf("seed %d: unexpected error = %v", seed, err)
+			}
 		}
-		waitReady(t, c)
-		s := &staleCacheStore{Store: ms, cache: c}
-		err = storetest.CheckLinearizable(ctx, s, storetest.Workload{Clients: 8, Ops: 60, Seed: seed})
-		c.Close()
-		if errors.Is(err, storetest.ErrNotLinearizable) {
-			return
-		}
-		if err != nil {
-			t.Fatalf("seed %d: unexpected error = %v", seed, err)
-		}
-	}
-	t.Fatal("20 workloads found no linearizability violation")
+		t.Fatal("20 workloads found no linearizability violation")
+	})
 }

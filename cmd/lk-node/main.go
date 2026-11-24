@@ -10,16 +10,21 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Kaikei-e/Nayutar/core/netpol"
 	"github.com/Kaikei-e/Nayutar/core/node"
 	"github.com/Kaikei-e/Nayutar/core/node/cni"
 	ctrd "github.com/Kaikei-e/Nayutar/core/node/containerd"
 	"github.com/Kaikei-e/Nayutar/core/node/netns"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 )
 
 type runtimeDeps struct {
 	signalContext func(context.Context) (context.Context, context.CancelFunc)
 	buildAdapters func(node.Config) (node.Runtime, node.NetnsManager, node.CNIRunner, func() error, error)
+	buildNetpol   func(node.NetpolConfig) (netpol.NftRunner, error)
 	clock         node.Clock
+	disk          sim.Disk
+	sysctl        sim.Disk
 }
 
 func defaultDeps() runtimeDeps {
@@ -28,7 +33,11 @@ func defaultDeps() runtimeDeps {
 			return signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 		},
 		buildAdapters: buildRealAdapters,
-		clock:         node.RealClock(),
+		buildNetpol: func(cfg node.NetpolConfig) (netpol.NftRunner, error) {
+			return netpol.NewExecNftRunner(cfg.NftBin)
+		},
+		clock: node.RealClock(),
+		disk:  sim.OSDisk(),
 	}
 }
 
@@ -98,13 +107,72 @@ func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, d run
 }
 
 func runFile(ctx context.Context, configPath string, stdout, stderr io.Writer, d runtimeDeps) (int, error) {
-	src, err := os.ReadFile(configPath)
+	disk := d.disk
+	if disk == nil {
+		disk = sim.OSDisk()
+	}
+	src, err := disk.ReadFile(configPath)
 	if err != nil {
 		return 1, fmt.Errorf("read %s: %w", configPath, err)
 	}
 	cfg, err := node.DecodeConfig(configPath, src)
 	if err != nil {
 		return 1, err
+	}
+
+	sigCtx, stopSig := d.signalContext(ctx)
+	defer stopSig()
+
+	if cfg.Netpol != nil {
+		npSrc, err := disk.ReadFile(cfg.Netpol.PolicyFile)
+		if err != nil {
+			return 1, fmt.Errorf("read netpol %s: %w", cfg.Netpol.PolicyFile, err)
+		}
+		bundle, err := netpol.DecodeBundle(cfg.Netpol.PolicyFile, npSrc)
+		if err != nil {
+			return 1, err
+		}
+		cp, cerr := netpol.Compile(bundle)
+		if cerr != nil {
+			return 1, fmt.Errorf("compile netpol: %w", cerr)
+		}
+		subnets := make([]string, len(cfg.CNI.Ranges))
+		for i, r := range cfg.CNI.Ranges {
+			subnets[i] = r.Subnet
+		}
+		if cfg.Unit.Tenant != "" {
+			if err := cp.ValidateUnitSubnets(cfg.Unit.Tenant, subnets); err != nil {
+				return 1, err
+			}
+		} else if err := cp.ValidateUntenantedSubnets(subnets); err != nil {
+			return 1, err
+		}
+		buildNP := d.buildNetpol
+		if buildNP == nil {
+			buildNP = func(nc node.NetpolConfig) (netpol.NftRunner, error) {
+				return netpol.NewExecNftRunner(nc.NftBin)
+			}
+		}
+		npRunner, err := buildNP(*cfg.Netpol)
+		if err != nil {
+			return 1, err
+		}
+		sysctl := d.sysctl
+		if sysctl == nil {
+			rooted, err := sim.NewRootedDisk(netpol.SysctlNetDir)
+			if err != nil {
+				return 1, fmt.Errorf("open %s: %w", netpol.SysctlNetDir, err)
+			}
+			defer func() { _ = rooted.Close() }()
+			sysctl = rooted
+		}
+		enforcer, err := netpol.NewEnforcer(npRunner, sysctl)
+		if err != nil {
+			return 1, err
+		}
+		if err := enforcer.ApplyCompiled(sigCtx, cp); err != nil {
+			return 1, fmt.Errorf("apply netpol: %w", err)
+		}
 	}
 
 	rt, nsMgr, cniRunner, closeFn, err := d.buildAdapters(cfg)
@@ -118,9 +186,6 @@ func runFile(ctx context.Context, configPath string, stdout, stderr io.Writer, d
 			}
 		}()
 	}
-
-	sigCtx, stopSig := d.signalContext(ctx)
-	defer stopSig()
 
 	runner, err := node.NewRunner(node.RunnerConfig{
 		Unit:    cfg.Unit,

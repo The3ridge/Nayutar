@@ -1,6 +1,6 @@
 ---
 title: 既定拒否のネットワークポリシーはまず nftables で強制し、G2 で eBPF と比較する
-status: proposed
+status: accepted
 date: 2026-11-17
 depends-on: ["0001"]
 ---
@@ -37,14 +37,14 @@ table inet nayutar {
 ## 根拠（調査結果・出典）
 
 - 内部前提との整合：[[0001]] の前提 4・7 に従い、Linux カーネル標準の `nftables` でまず最小構成の既定拒否を実装し、G2 で性能と運用性を比較した上で後続を判断する。これにより [[0006]] が定めるテナント境界をデータプレーンでも担保する。
-- `nftables` のチェイン仕様：`nftables` では `policy`（`accept` / `drop`）はフックに接続されたベースチェインにのみ設定でき、既定値は `accept` であること、テーブルおよび通常チェインには `policy` が存在しないことを一次資料で確認した（https://wiki.nftables.org/ ）。そのためテナントごとの通常チェイン自体には `policy drop` を置けず、ベースチェインの `policy drop` と通常チェインでの明示許可・`jump` を組み合わせる必要がある。
-- eBPF との比較材料：`cilium/ebpf` の最新リリースが v0.22.0 であることを一次資料で確認した（https://pkg.go.dev/github.com/cilium/ebpf?tab=versions ）。ただし本 ADR では BTF 等の環境依存や検証コストのリスクを見込んでおり、Cilium の非 Kubernetes 経路も未確認である。
+- `nftables` のチェイン・原子的置換・ブリッジ境界の仕様：`nftables`（最新版 `1.1.7`、Ubuntu 24.04 標準 `1.0.9`、`GPL-2.0-only`）では `policy`（`accept` / `drop`）はフックに接続されたベースチェインにのみ設定でき、通常チェインには `policy` が存在せず `jump` 未一致時は呼び出し元ベースチェインへ戻ることを一次資料で確認した（https://wiki.nftables.org/wiki-nftables/index.php/Configuring_chains 、https://www.netfilter.org/projects/nftables/manpage.html ）。また単一 `nft -f -` バッチによるテーブル再構築がリーク窓ゼロで原子適用されること（https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement ）を確認した。同一 Linux ブリッジ内の L2 通信が `br_netfilter` 無しでは `NF_INET_FORWARD` を通過しないことは、引用できる一次資料に明記が無く、[[0033]] と [[0034]] の実測で確かめた（フックの配置は https://wiki.nftables.org/wiki-nftables/index.php/Netfilter_hooks 、`bridge-nf-call-iptables` は https://docs.kernel.org/networking/ip-sysctl.html ）。このためテナント別ブリッジ＋非重複 CIDR の L3 ルーティング構成（[[0033]]）で `inet forward` に通す。
+- eBPF との比較材料：`cilium/ebpf` の最新リリースが 2026-11-24 時点でも v0.22.0（MIT）であることを一次資料で確認した（https://pkg.go.dev/github.com/cilium/ebpf?tab=versions ）。本 ADR では BTF 等の環境依存や検証コストのリスクを見込み、G2 で実測比較する。
 
 ## 検討した代替案
 
 - **最初から eBPF（`cilium/ebpf`）だけで実装する**：TC / cgroup フックにより高スループットやソケット層の制御を狙える。しかし G1 の段階から BTF やカーネル版依存の検証負担を負うことになり、比較基準もないため採らない。
-- **Cilium をそのままポリシーエンジンとして組み込む**：L3/L4/L7 にわたる既存の機能群を利用できる。しかし Cilium の非 Kubernetes 経路が未確認であり、Kubernetes 前提の制御面や運用複雑性を取り込む恐れがあるため採らない。
-- **`iptables` を使う**：既存の事例やツールが多い。しかし規則集合をまとめて差し替える操作やテナントごとのチェイン構成は `nftables` のほうが表しやすく、あえて `iptables` を選ぶ理由がないため採らない（両者の性能比較は未確認である）。
+- **Cilium をそのままポリシーエンジンとして組み込む**：L3/L4/L7 にわたる既存の機能群を利用できる。しかし Kubernetes 前提の制御面や運用複雑性を取り込む恐れがあるため採らない。
+- **`iptables` を使う**：既存の事例やツールが多い。しかし `nft -f -` による単一 Netlink トランザクションでのテーブル原子置換や IPv4/IPv6 統合 `inet` ファミリ・テナント別チェイン構成は `nftables` のほうが明確に表せるため採らない。
 - **G2 までポリシーを実装せず既定許可で進める**：G1 のデータプレーン実装が軽くなる。しかしテナント隔離を中核とする設計に反し、越境通信の否定試験を早期に回せないため採らない。
 
 ## 影響とトレードオフ
@@ -58,3 +58,5 @@ table inet nayutar {
 
 - [[0001]]：既存資産の活用（前提 4）および検証ゲート単位の段階的判断（前提 7）を定めた前提 ADR。
 - [[0006]]：テナントを最上位キーかつ隔離単位とした決定であり、本 ADR はその隔離境界をデータプレーンで強制する。
+- [[0033]]：本決定の初期実現方式（純粋ポリシー核 `core/netpol` と Lean 10 定理・DRT、テナント別ブリッジ、`os/exec` による `nft -f -` 原子バッチ、CI `netpol-nftables` 結合試験）を定める ADR。
+- [[0034]]：[[0033]] の実データプレーン上の穴（送信元の詐称・同一ブリッジ内の L2 転送・ホスト宛の通信）を塞ぐ ADR。

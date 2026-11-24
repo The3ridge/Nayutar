@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Kaikei-e/Nayutar/core/store"
@@ -110,7 +111,7 @@ func (s tornRange) Range(ctx context.Context, prefix string, atRev store.Rev, li
 }
 
 func TestCheckLinearizableAcceptsTheReferenceStore(t *testing.T) {
-	storetest.RunLinearizability(t, func(*testing.T) store.Store { return memstore.New() })
+	storetest.RunLinearizabilitySynctest(t, func(*testing.T) store.Store { return memstore.New() })
 }
 
 func TestCheckLinearizableRejectsBrokenStores(t *testing.T) {
@@ -126,29 +127,33 @@ func TestCheckLinearizableRejectsBrokenStores(t *testing.T) {
 	}
 	for _, v := range variants {
 		t.Run(v.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			for seed := uint64(1); seed <= 20; seed++ {
-				err := storetest.CheckLinearizable(ctx, v.build(), storetest.Workload{Clients: 8, Ops: 60, Seed: seed})
-				if errors.Is(err, storetest.ErrNotLinearizable) {
-					return
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				defer cancel()
+				for seed := uint64(1); seed <= 20; seed++ {
+					err := storetest.CheckLinearizable(ctx, v.build(), storetest.Workload{Clients: 8, Ops: 60, Seed: seed})
+					if errors.Is(err, storetest.ErrNotLinearizable) {
+						return
+					}
+					if err != nil {
+						t.Fatalf("seed %d: the check failed for another reason: %v", seed, err)
+					}
 				}
-				if err != nil {
-					t.Fatalf("seed %d: the check failed for another reason: %v", seed, err)
-				}
-			}
-			t.Fatal("20 workloads found no violation")
+				t.Fatal("20 workloads found no violation")
+			})
 		})
 	}
 }
 
 func TestCheckLinearizableReportsCallErrors(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := storetest.CheckLinearizable(ctx, memstore.New(), storetest.Workload{Clients: 2, Ops: 5, Seed: 1})
-	if err == nil || errors.Is(err, storetest.ErrNotLinearizable) {
-		t.Fatalf("CheckLinearizable on a canceled context = %v, want a call error", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := storetest.CheckLinearizable(ctx, memstore.New(), storetest.Workload{Clients: 2, Ops: 5, Seed: 1})
+		if err == nil || errors.Is(err, storetest.ErrNotLinearizable) {
+			t.Fatalf("CheckLinearizable on a canceled context = %v, want a call error", err)
+		}
+	})
 }
 
 // pacedStore adds a short delay per call so paced clients overlap on memstore.
@@ -222,68 +227,76 @@ func (s errAfterAppliedTxn) Txn(ctx context.Context, cmps []store.Cmp, ops []sto
 }
 
 func TestCheckLinearizableAllowsAmbiguousErrorsWithDisrupt(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	s := newErrAfterAppliedTxn(pacedStore{memstore.New()})
-	w := storetest.Workload{
-		Clients: 8,
-		Ops:     20,
-		Seed:    1,
-		Disrupt: func(context.Context) error {
-			time.Sleep(50 * time.Millisecond)
-			return nil
-		},
-	}
-	if err := storetest.CheckLinearizable(ctx, s, w); err != nil {
-		t.Fatalf("CheckLinearizable with Disrupt and ambiguous errors = %v, want nil", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		s := newErrAfterAppliedTxn(pacedStore{memstore.New()})
+		w := storetest.Workload{
+			Clients: 8,
+			Ops:     20,
+			Seed:    1,
+			Disrupt: func(context.Context) error {
+				time.Sleep(50 * time.Millisecond)
+				return nil
+			},
+		}
+		if err := storetest.CheckLinearizable(ctx, s, w); err != nil {
+			t.Fatalf("CheckLinearizable with Disrupt and ambiguous errors = %v, want nil", err)
+		}
+	})
 }
 
 func TestCheckLinearizableRejectsBrokenStoreWithDisrupt(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	for seed := uint64(1); seed <= 20; seed++ {
-		s := newErrAfterAppliedTxn(staleReads{pacedStore{memstore.New()}})
-		w := storetest.Workload{
-			Clients: 8,
-			Ops:     25,
-			Seed:    seed,
-			Disrupt: func(context.Context) error { return nil },
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		for seed := uint64(1); seed <= 20; seed++ {
+			s := newErrAfterAppliedTxn(staleReads{pacedStore{memstore.New()}})
+			w := storetest.Workload{
+				Clients: 8,
+				Ops:     25,
+				Seed:    seed,
+				Disrupt: func(context.Context) error { return nil },
+			}
+			err := storetest.CheckLinearizable(ctx, s, w)
+			if errors.Is(err, storetest.ErrNotLinearizable) {
+				return
+			}
+			if err != nil {
+				t.Fatalf("seed %d: unexpected error = %v", seed, err)
+			}
 		}
-		err := storetest.CheckLinearizable(ctx, s, w)
-		if errors.Is(err, storetest.ErrNotLinearizable) {
-			return
-		}
-		if err != nil {
-			t.Fatalf("seed %d: unexpected error = %v", seed, err)
-		}
-	}
-	t.Fatal("20 workloads found no violation")
+		t.Fatal("20 workloads found no violation")
+	})
 }
 
 func TestCheckLinearizableWithoutDisruptFailsOnError(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	s := newErrAfterAppliedTxn(memstore.New())
-	err := storetest.CheckLinearizable(ctx, s, storetest.Workload{Clients: 4, Ops: 20, Seed: 1})
-	if err == nil || errors.Is(err, storetest.ErrNotLinearizable) {
-		t.Fatalf("CheckLinearizable without Disrupt = %v, want a call error", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		s := newErrAfterAppliedTxn(memstore.New())
+		err := storetest.CheckLinearizable(ctx, s, storetest.Workload{Clients: 4, Ops: 20, Seed: 1})
+		if err == nil || errors.Is(err, storetest.ErrNotLinearizable) {
+			t.Fatalf("CheckLinearizable without Disrupt = %v, want a call error", err)
+		}
+	})
 }
 
 func TestCheckLinearizableReportsDisruptError(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	want := errors.New("disrupt failed")
-	err := storetest.CheckLinearizable(ctx, pacedStore{memstore.New()}, storetest.Workload{
-		Clients: 4,
-		Ops:     10,
-		Seed:    1,
-		Disrupt: func(context.Context) error { return want },
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		want := errors.New("disrupt failed")
+		err := storetest.CheckLinearizable(ctx, pacedStore{memstore.New()}, storetest.Workload{
+			Clients: 4,
+			Ops:     10,
+			Seed:    1,
+			Disrupt: func(context.Context) error { return want },
+		})
+		if !errors.Is(err, want) {
+			t.Fatalf("CheckLinearizable error = %v, want %v", err, want)
+		}
 	})
-	if !errors.Is(err, want) {
-		t.Fatalf("CheckLinearizable error = %v, want %v", err, want)
-	}
 }
 
 func TestScopeIsolatesKeysAndShiftsRevisions(t *testing.T) {
@@ -292,7 +305,7 @@ func TestScopeIsolatesKeysAndShiftsRevisions(t *testing.T) {
 	if _, _, err := inner.Txn(ctx, nil, []store.Op{{Type: store.OpPut, Key: "outside", Value: []byte("x")}}); err != nil {
 		t.Fatal(err)
 	}
-	storetest.Run(t, func(t *testing.T) store.Store {
+	storetest.RunSynctest(t, func(t *testing.T) store.Store {
 		base, err := inner.CurrentRev(ctx)
 		if err != nil {
 			t.Fatal(err)

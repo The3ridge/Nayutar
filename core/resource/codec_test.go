@@ -39,7 +39,7 @@ func TestEncodeOrderCompactAndPrefix(t *testing.T) {
 	metaIdx := bytes.Index(encoded, []byte(`"meta":`))
 	specIdx := bytes.Index(encoded, []byte(`"spec":`))
 	statusIdx := bytes.Index(encoded, []byte(`"status":`))
-	if !(metaIdx > 0 && metaIdx < specIdx && specIdx < statusIdx) {
+	if metaIdx <= 0 || metaIdx >= specIdx || specIdx >= statusIdx {
 		t.Fatalf("unexpected field order in %s", encoded)
 	}
 

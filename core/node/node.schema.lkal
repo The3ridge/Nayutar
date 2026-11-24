@@ -117,6 +117,20 @@ def "cni" {
   }
 }
 
+def "netpol" {
+  type = .record
+  field "policyFile" {
+    type = .string
+    required = true
+    min-length = 1
+  }
+  field "nftBin" {
+    type = .string
+    default = "/usr/sbin/nft"
+    min-length = 1
+  }
+}
+
 def "unit" {
   type = .record
   field "id" {
@@ -125,6 +139,12 @@ def "unit" {
     min-length = 1
     max-length = 63
     pattern = "[a-z0-9]([a-z0-9._-]*[a-z0-9])?"
+  }
+  field "tenant" {
+    type = .string
+    min-length = 1
+    max-length = 63
+    pattern = "[a-z0-9]([a-z0-9-]*[a-z0-9])?"
   }
   field "image" {
     type = .string
@@ -205,4 +225,5 @@ root {
     required = true
     use = &def/unit
   }
+  field "netpol" { use = &def/netpol }
 }

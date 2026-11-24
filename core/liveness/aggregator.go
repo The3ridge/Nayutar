@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Kaikei-e/Nayutar/core/sim"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 )
@@ -23,15 +24,7 @@ const (
 )
 
 // Clock is the time source of a runner.
-type Clock interface {
-	Now() time.Time
-	After(d time.Duration) <-chan time.Time
-}
-
-type realClock struct{}
-
-func (realClock) Now() time.Time                         { return time.Now() }
-func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+type Clock = sim.Clock
 
 // Transport delivers messages best effort. Send must not block; Recv is closed never.
 type Transport interface {
@@ -87,7 +80,7 @@ func NewAggregator(cfg AggregatorConfig) (*Aggregator, error) {
 	}
 	clk := cfg.Clock
 	if clk == nil {
-		clk = realClock{}
+		clk = sim.RealClock()
 	}
 	engCfg := cfg.Engine
 	if engCfg.Detector.RoundBase == 0 {
@@ -103,7 +96,7 @@ func NewAggregator(cfg AggregatorConfig) (*Aggregator, error) {
 	return &Aggregator{
 		engine:       eng,
 		store:        cfg.Store,
-		registry:     NewRegistry(cfg.Store),
+		registry:     NewRegistryWithClock(cfg.Store, clk),
 		transport:    cfg.Transport,
 		clock:        clk,
 		tickInterval: tickInterval,
@@ -387,7 +380,7 @@ func (a *Aggregator) executeProposal(
 	defer wg.Done()
 	defer func() { <-slots }()
 
-	wctx, cancel := context.WithTimeout(ctx, a.storeTimeout)
+	wctx, cancel := sim.WithTimeout(ctx, a.clock, a.storeTimeout)
 	defer cancel()
 
 	var err error

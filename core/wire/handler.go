@@ -19,6 +19,7 @@ import (
 	"github.com/Kaikei-e/Nayutar/core/resource/ownership"
 	"github.com/Kaikei-e/Nayutar/core/resource/patch"
 	"github.com/Kaikei-e/Nayutar/core/resource/refs"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 	"github.com/Kaikei-e/Nayutar/core/store/tenant"
@@ -93,6 +94,14 @@ func New(cfg Config) (*Handler, error) {
 	if maxList == 0 {
 		maxList = DefaultMaxListLimit
 	}
+	nowFn := cfg.Now
+	if nowFn == nil {
+		nowFn = sim.RealClock().Now
+	}
+	randReader := cfg.Rand
+	if randReader == nil {
+		randReader = sim.RandReader(sim.CryptoRand())
+	}
 	return &Handler{
 		registry:         cfg.Registry,
 		caches:           cfg.Caches,
@@ -101,8 +110,8 @@ func New(cfg Config) (*Handler, error) {
 		scopeResolver:    cfg.ScopeResolver,
 		authenticate:     cfg.Authenticate,
 		defaultPrincipal: cfg.DefaultPrincipal,
-		now:              cfg.Now,
-		rand:             cfg.Rand,
+		now:              nowFn,
+		rand:             randReader,
 		maxBodyBytes:     maxBody,
 		maxListLimit:     maxList,
 	}, nil

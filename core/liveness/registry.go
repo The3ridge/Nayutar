@@ -8,6 +8,7 @@ import (
 
 	"github.com/Kaikei-e/Nayutar/core/liveness/budget"
 	"github.com/Kaikei-e/Nayutar/core/liveness/detector"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 	"github.com/Kaikei-e/Nayutar/core/store"
 	"github.com/Kaikei-e/Nayutar/core/store/keyspace"
 )
@@ -30,12 +31,21 @@ const (
 
 // Registry manages cluster-wide node liveness records and the eviction budget in the store.
 type Registry struct {
-	root store.Store
+	root  store.Store
+	clock Clock
 }
 
-// NewRegistry returns a Registry backed by the cluster-wide store root.
+// NewRegistry returns a Registry backed by the cluster-wide store root using sim.RealClock().
 func NewRegistry(root store.Store) *Registry {
-	return &Registry{root: root}
+	return NewRegistryWithClock(root, nil)
+}
+
+// NewRegistryWithClock returns a Registry backed by root using clock (or sim.RealClock() if nil).
+func NewRegistryWithClock(root store.Store, clock Clock) *Registry {
+	if clock == nil {
+		clock = sim.RealClock()
+	}
+	return &Registry{root: root, clock: clock}
 }
 
 func nodeKey(node string) (string, error) {
@@ -111,7 +121,7 @@ func (r *Registry) list(ctx context.Context, strict bool, perCallTimeout time.Du
 		rctx := ctx
 		var cancel context.CancelFunc
 		if perCallTimeout > 0 {
-			rctx, cancel = context.WithTimeout(ctx, perCallTimeout)
+			rctx, cancel = sim.WithTimeout(ctx, r.clock, perCallTimeout)
 		}
 		kvs, rev, next, err := r.root.Range(rctx, keyspace.NodesPrefix, snapRev, listPage, cont)
 		if cancel != nil {

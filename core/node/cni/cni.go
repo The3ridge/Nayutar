@@ -238,13 +238,14 @@ func NewBridgeChain(cfg BridgeConfig) (*Chain, error) {
 	}
 
 	bridgeMap := map[string]any{
-		"cniVersion": CNIVersion,
-		"name":       cfg.NetworkName,
-		"type":       "bridge",
-		"bridge":     cfg.Bridge,
-		"isGateway":  !cfg.DisableGateway,
-		"ipMasq":     cfg.IPMasq,
-		"ipam":       ipam,
+		"cniVersion":       CNIVersion,
+		"name":             cfg.NetworkName,
+		"type":             "bridge",
+		"bridge":           cfg.Bridge,
+		"isGateway":        !cfg.DisableGateway,
+		"isDefaultGateway": !cfg.DisableGateway,
+		"ipMasq":           cfg.IPMasq,
+		"ipam":             ipam,
 	}
 	if cfg.MTU > 0 {
 		bridgeMap["mtu"] = cfg.MTU

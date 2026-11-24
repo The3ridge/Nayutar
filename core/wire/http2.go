@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Kaikei-e/Nayutar/core/sim"
 )
 
 const defaultReadHeaderTimeout = 10 * time.Second
@@ -41,6 +43,11 @@ func ConfigureServer(srv *http.Server, allowH2C bool) {
 
 // NewH2CClient returns a Client configured for prior-knowledge unencrypted HTTP/2 (h2c) against baseURL.
 func NewH2CClient(baseURL string) *Client {
+	return NewH2CClientWithNet(baseURL, nil)
+}
+
+// NewH2CClientWithNet returns an h2c Client that dials via netImpl when non-nil.
+func NewH2CClientWithNet(baseURL string, netImpl sim.Net) *Client {
 	var protocols http.Protocols
 	// Go 1.27 requires HTTP1 disabled on Transport.Protocols for prior-knowledge h2c over http:// URLs.
 	protocols.SetUnencryptedHTTP2(true)
@@ -48,11 +55,19 @@ func NewH2CClient(baseURL string) *Client {
 		Protocols: &protocols,
 		HTTP2:     &http.HTTP2Config{},
 	}
+	if netImpl != nil {
+		tr.DialContext = netImpl.DialContext
+	}
 	return NewClient(baseURL, &http.Client{Transport: tr})
 }
 
 // NewTLSClient returns a Client configured for TLS HTTP/2 (h2) against baseURL.
 func NewTLSClient(baseURL string, tlsCfg *tls.Config) *Client {
+	return NewTLSClientWithNet(baseURL, tlsCfg, nil)
+}
+
+// NewTLSClientWithNet returns a TLS HTTP/2 Client that dials via netImpl when non-nil.
+func NewTLSClientWithNet(baseURL string, tlsCfg *tls.Config, netImpl sim.Net) *Client {
 	var protocols http.Protocols
 	protocols.SetHTTP2(true)
 	var cloned *tls.Config
@@ -68,6 +83,9 @@ func NewTLSClient(baseURL string, tlsCfg *tls.Config) *Client {
 		TLSClientConfig: cloned,
 		Protocols:       &protocols,
 		HTTP2:           &http.HTTP2Config{},
+	}
+	if netImpl != nil {
+		tr.DialContext = netImpl.DialContext
 	}
 	return NewClient(baseURL, &http.Client{Transport: tr})
 }

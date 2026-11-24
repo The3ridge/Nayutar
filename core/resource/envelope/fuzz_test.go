@@ -1,7 +1,6 @@
 package envelope_test
 
 import (
-	"encoding/binary"
 	"errors"
 	"reflect"
 	"testing"
@@ -106,14 +105,6 @@ func (r *byteReader) u8() byte {
 	b := r.data[r.pos]
 	r.pos++
 	return b
-}
-
-func (r *byteReader) i64() int64 {
-	var buf [8]byte
-	for i := range buf {
-		buf[i] = r.u8()
-	}
-	return int64(binary.LittleEndian.Uint64(buf[:]))
 }
 
 func (r *byteReader) str(maxLen int) string {

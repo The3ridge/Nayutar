@@ -288,7 +288,7 @@ func isUID(s string) bool {
 			}
 			continue
 		}
-		if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')) {
+		if (b < '0' || b > '9') && (b < 'a' || b > 'f') {
 			return false
 		}
 	}

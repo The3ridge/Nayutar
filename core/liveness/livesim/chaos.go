@@ -2,6 +2,7 @@ package livesim
 
 import (
 	"github.com/Kaikei-e/Nayutar/core/liveness"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 )
 
 const (
@@ -106,8 +107,8 @@ func (s *Sim) handleChaosStep(streamID uint64) {
 	}
 
 	if faultyCount < cfg.MaxFaultyAggregators && len(healthy) > 0 {
-		agg := healthy[s.rng.IntN(len(healthy))]
-		kind := chaosFaultKind(1 + s.rng.IntN(4))
+		agg := healthy[sim.IntN(s.rng, len(healthy))]
+		kind := chaosFaultKind(1 + sim.IntN(s.rng, 4))
 		fault := chaosFault{kind: kind, agg: agg}
 
 		switch kind {
@@ -118,10 +119,10 @@ func (s *Sim) handleChaosStep(streamID uint64) {
 		case chaosStoreCut:
 			s.CutStore(agg)
 		case chaosNodeCuts:
-			k := 1 + s.rng.IntN(len(s.nodeNames))
-			perm := s.rng.Perm(len(s.nodeNames))
-			twoWay := s.rng.IntN(2) == 0
-			aggToNode := s.rng.IntN(2) == 0
+			k := 1 + sim.IntN(s.rng, len(s.nodeNames))
+			perm := sim.Perm(s.rng, len(s.nodeNames))
+			twoWay := sim.IntN(s.rng, 2) == 0
+			aggToNode := sim.IntN(s.rng, 2) == 0
 			aggAddr := liveness.Addr{ID: agg}
 			for _, idx := range perm[:k] {
 				nodeAddr := liveness.Addr{ID: s.nodeNames[idx], Node: true}

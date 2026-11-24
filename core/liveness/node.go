@@ -9,6 +9,7 @@ import (
 
 	"github.com/Kaikei-e/Nayutar/core/liveness/agent"
 	"github.com/Kaikei-e/Nayutar/core/liveness/hrw"
+	"github.com/Kaikei-e/Nayutar/core/sim"
 )
 
 // NodeConfig configures a Node runner.
@@ -43,7 +44,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	}
 	clk := cfg.Clock
 	if clk == nil {
-		clk = realClock{}
+		clk = sim.RealClock()
 	}
 	aggs := slices.Clone(cfg.Aggregators)
 	agentCfg := cfg.Agent

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Kaikei-e/Nayutar/core/store"
@@ -23,6 +24,7 @@ type testSource struct {
 	currentRevs  atomic.Int64
 	progressReqs atomic.Int64
 
+	wg             sync.WaitGroup
 	mu             sync.Mutex
 	blockRange     bool
 	rangeUnblocked chan struct{}
@@ -175,8 +177,16 @@ func (s *testSource) Watch(ctx context.Context, prefix string, fromRev store.Rev
 	s.mu.Lock()
 	s.curWatch = tw
 	s.mu.Unlock()
-	go tw.pump(ctx)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		tw.pump(ctx)
+	}()
 	return tw, nil
+}
+
+func (s *testSource) wait() {
+	s.wg.Wait()
 }
 
 type testWatchStream struct {
@@ -314,7 +324,7 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, msg string
 		if cond() {
 			return
 		}
-		time.Sleep(2 * time.Millisecond)
+		<-time.After(2 * time.Millisecond)
 	}
 	if cond() {
 		return
@@ -328,6 +338,16 @@ type scenarioOpts struct {
 	iters          int
 	stressSteps    int
 	checkGoroutine bool
+	inSynctest     bool
+}
+
+func runScenario(t *testing.T, opts scenarioOpts, fn func(*testing.T)) {
+	t.Helper()
+	if opts.inSynctest {
+		synctest.Test(t, fn)
+		return
+	}
+	fn(t)
 }
 
 func memstoreOpts() scenarioOpts {
@@ -337,6 +357,7 @@ func memstoreOpts() scenarioOpts {
 		iters:          500,
 		stressSteps:    80,
 		checkGoroutine: true,
+		inSynctest:     true,
 	}
 }
 
@@ -406,6 +427,9 @@ func mustNewCache(t *testing.T, src watchcache.Source, prefix string, cfg watchc
 	c, err := watchcache.New(src, prefix, cfg)
 	if err != nil {
 		t.Fatalf("watchcache.New: %v", err)
+	}
+	if ts, ok := src.(*testSource); ok {
+		t.Cleanup(ts.wait)
 	}
 	t.Cleanup(c.Close)
 	return c

@@ -167,6 +167,7 @@ func TestVulnerabilityScanIsPinnedAndNotSwallowed(t *testing.T) {
 		"run: go install golang.org/x/vuln/cmd/govulncheck@v1.10.0",
 		"run: govulncheck -test ./...",
 		"run: govulncheck -test -tags drt,etcd ./...",
+		"run: govulncheck -test -tags drt,etcd,containerd,nftables ./...",
 	} {
 		if !hasTrimmedLine(job, want) {
 			t.Errorf("vulncheck job must contain the exact line %q", want)
@@ -331,7 +332,9 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 		"core/drt/patch_drt_test.go":                     "//go:build drt",
 		"core/drt/ownership_drt_test.go":                 "//go:build drt",
 		"core/drt/node_drt_test.go":                      "//go:build drt",
+		"core/drt/netpol_drt_test.go":                    "//go:build drt",
 		"core/node/containerd_linux_test.go":             "//go:build linux && containerd",
+		"core/netpol/nftables_linux_test.go":             "//go:build linux && nftables",
 		"core/drt/store_etcd_drt_test.go":                "//go:build drt && etcd",
 	} {
 		firstLine, _, _ := strings.Cut(readRepoFile(t, rel), "\n")
@@ -397,6 +400,15 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 			"func TestNodeComparisonDetectsEveryFieldMutation(",
 			"func TestNodeDRTCatchesBrokenImplementations(",
 		},
+		"core/drt/netpol_drt_test.go": {
+			"func TestNetpolMatchesLeanModel(",
+			"func TestNetpolCasesReachEveryOutcome(",
+			"func TestNetpolComparisonDetectsEveryFieldMutation(",
+			"func TestNetpolDRTCatchesBrokenImplementations(",
+		},
+		"core/netpol/nftables_linux_test.go": {
+			"func TestNftablesDefaultDenyAndMutualAllow(",
+		},
 	} {
 		body := readRepoFile(t, rel)
 		for _, fn := range fns {
@@ -404,6 +416,31 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 				t.Errorf("%s missing %s", rel, fn)
 			}
 		}
+	}
+}
+
+func TestNetpolNftablesJobRunsWithoutSkipping(t *testing.T) {
+	job := extractJob(readRepoFile(t, ".github/workflows/ci.yml"), "netpol-nftables:")
+	if job == "" {
+		t.Fatal("ci.yml has no netpol-nftables job")
+	}
+	for _, needle := range []string{
+		"timeout-minutes: 10",
+		"contents: read",
+		"persist-credentials: false",
+		"CNI_PLUGINS_SHA256:",
+		"sha256sum --check --strict",
+		"nftables",
+		"go vet -tags nftables ./core/netpol/...",
+		"go test -count=1 -tags nftables ./core/netpol/...",
+		"go test -race -count=1 -tags nftables ./core/netpol/...",
+	} {
+		if !strings.Contains(job, needle) {
+			t.Errorf("netpol-nftables job missing %s", needle)
+		}
+	}
+	if strings.Contains(job, " -run ") {
+		t.Error("netpol-nftables test steps must not narrow the run with -run")
 	}
 }
 

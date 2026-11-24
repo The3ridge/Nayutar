@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Kaikei-e/Nayutar/core/store"
@@ -30,6 +31,15 @@ const (
 
 // Run runs the contract tests against stores made by newStore.
 func Run(t *testing.T, newStore Factory) {
+	runContract(t, newStore, false)
+}
+
+// RunSynctest runs every contract subtest inside a testing/synctest bubble with virtual time.
+func RunSynctest(t *testing.T, newStore Factory) {
+	runContract(t, newStore, true)
+}
+
+func runContract(t *testing.T, newStore Factory, useSynctest bool) {
 	tests := []struct {
 		name string
 		fn   func(t *testing.T, s store.Store)
@@ -69,6 +79,12 @@ func Run(t *testing.T, newStore Factory) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if useSynctest {
+				synctest.Test(t, func(t *testing.T) {
+					tc.fn(t, newStore(t))
+				})
+				return
+			}
 			tc.fn(t, newStore(t))
 		})
 	}
@@ -1155,19 +1171,23 @@ func testWatchIsolatesProgressAcrossStreams(t *testing.T, s store.Store) {
 	deadline := time.After(quietCheck)
 	retry := time.NewTicker(syncRetry)
 	defer retry.Stop()
-	for waiting := true; waiting; {
+	sendProbes := func() {
 		if err := caughtUp.RequestProgress(ctxFor(t)); err != nil {
 			t.Fatalf("caughtUp.RequestProgress: %v", err)
 		}
 		if err := future.RequestProgress(ctxFor(t)); err != nil {
 			t.Fatalf("future.RequestProgress: %v", err)
 		}
+	}
+	sendProbes()
+	for waiting := true; waiting; {
 		select {
 		case ev, open := <-future.Events():
 			t.Fatalf("future watch from %d received %s (open=%v) while store is at %d",
 				base+4, formatEvents([]store.Event{ev}), open, r2)
 		case <-caughtUp.Events():
 		case <-retry.C:
+			sendProbes()
 		case <-deadline:
 			waiting = false
 		}
@@ -1204,9 +1224,12 @@ func testEndedWatchReportsItsError(t *testing.T, s store.Store) {
 			t.Fatal(err)
 		}
 		opened++
+		<-ctx.Done()
 		for err == nil {
-			runtime.Gosched()
 			err = ws.RequestProgress(context.Background())
+			if err == nil {
+				<-time.After(time.Millisecond)
+			}
 		}
 		cancel()
 		if !errors.Is(err, context.DeadlineExceeded) {

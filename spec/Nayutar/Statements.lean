@@ -7,3 +7,4 @@ import Nayutar.Statements.OrderedSet
 import Nayutar.Statements.Patch
 import Nayutar.Statements.Ownership
 import Nayutar.Statements.Node
+import Nayutar.Statements.Netpol

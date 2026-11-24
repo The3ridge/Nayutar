@@ -5,23 +5,16 @@ package node
 import (
 	"context"
 	"syscall"
-	"time"
+
+	"github.com/Kaikei-e/Nayutar/core/sim"
 )
 
 // Clock is the time source used by Runner.
-type Clock interface {
-	Now() time.Time
-	After(d time.Duration) <-chan time.Time
-}
-
-type realClock struct{}
-
-func (realClock) Now() time.Time                         { return time.Now() }
-func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+type Clock = sim.Clock
 
 // RealClock returns a Clock backed by the Go standard time package.
 func RealClock() Clock {
-	return realClock{}
+	return sim.RealClock()
 }
 
 // Mount describes a container filesystem mount.

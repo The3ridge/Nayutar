@@ -347,6 +347,64 @@ jobs:
             "NAYUTAR_CNI_BIN_DIR=${RUNNER_TEMP}/cni/bin" \
             go test -race -count=1 -tags containerd ./core/node/...
 
+  netpol-nftables:
+    name: Default-deny network policy (nftables)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Vet netpol package with nftables tag
+        run: go vet -tags nftables ./core/netpol/...
+
+      - name: Install nftables, iproute2 and CNI plugins
+        env:
+          CNI_PLUGINS_VERSION: v1.9.0
+          CNI_PLUGINS_SHA256: 58c03705426e929658f45a851df15a86d06ef680cacbf3f2dc127731ca265c28
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nftables iproute2
+
+          cni_archive="cni-plugins-linux-amd64-${CNI_PLUGINS_VERSION}.tgz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+            -o "${RUNNER_TEMP}/${cni_archive}" \
+            "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/${cni_archive}"
+          echo "${CNI_PLUGINS_SHA256}  ${RUNNER_TEMP}/${cni_archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/cni/bin"
+          tar -xzf "${RUNNER_TEMP}/${cni_archive}" -C "${RUNNER_TEMP}/cni/bin"
+          nft --version
+
+      - name: Run the real nftables and per-tenant bridge integration suite with and without race detector
+        run: |
+          set -euo pipefail
+          nft_bin="$(command -v nft)"
+          sudo env \
+            "PATH=${PATH}" \
+            "HOME=${HOME}" \
+            "GOCACHE=${RUNNER_TEMP}/go-build" \
+            "NAYUTAR_CNI_BIN_DIR=${RUNNER_TEMP}/cni/bin" \
+            "NAYUTAR_NFT_BIN=${nft_bin}" \
+            go test -count=1 -tags nftables ./core/netpol/...
+          sudo env \
+            "PATH=${PATH}" \
+            "HOME=${HOME}" \
+            "GOCACHE=${RUNNER_TEMP}/go-build" \
+            "NAYUTAR_CNI_BIN_DIR=${RUNNER_TEMP}/cni/bin" \
+            "NAYUTAR_NFT_BIN=${nft_bin}" \
+            go test -race -count=1 -tags nftables ./core/netpol/...
+
   vulncheck:
     name: Vulnerability scan (govulncheck)
     runs-on: ubuntu-24.04
@@ -377,5 +435,5 @@ jobs:
       - name: Scan the module and its tests with the drt and etcd build tags
         run: govulncheck -test -tags drt,etcd ./...
 
-      - name: Scan the module and its tests with the containerd build tag
-        run: govulncheck -test -tags drt,etcd,containerd ./...
+      - name: Scan the module and its tests with the containerd and nftables build tags
+        run: govulncheck -test -tags drt,etcd,containerd,nftables ./...

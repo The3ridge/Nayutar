@@ -254,7 +254,11 @@ func TestDecodeBudgetRejections(t *testing.T) {
 			}
 		})
 	}
+}
 
-	// Verify Record.ModRev field compiles and is store.Rev.
-	var _ store.Rev = Record{}.ModRev
+func requireRev(*store.Rev) {}
+
+func TestRecordModRevIsStoreRev(t *testing.T) {
+	var r Record
+	requireRev(&r.ModRev)
 }

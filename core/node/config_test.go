@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Kaikei-e/Nayutar/core/netpol"
 	"github.com/Kaikei-e/Nayutar/core/node"
 	"github.com/Kaikei-e/Nayutar/core/node/lifecycle"
 )
@@ -198,6 +199,32 @@ cni { netnsDir = "/", ranges "r0" { subnet = "10.88.0.0/24" } }
 unit { id = "u1", image = "img:1" }`,
 			wantErr: "non-root",
 		},
+		{
+			name: "invalid_unit_tenant",
+			src: `@lkal "0.1"
+containerd {}
+cni { ranges "r0" { subnet = "10.88.0.0/24" } }
+unit { id = "u1", tenant = "Bad_Tenant", image = "img:1" }`,
+			wantErr: "tenant",
+		},
+		{
+			name: "relative_netpol_policy_file",
+			src: `@lkal "0.1"
+containerd {}
+cni { ranges "r0" { subnet = "10.88.0.0/24" } }
+unit { id = "u1", image = "img:1" }
+netpol { policyFile = "rel/policy.lkal" }`,
+			wantErr: "policyFile",
+		},
+		{
+			name: "relative_netpol_nft_bin",
+			src: `@lkal "0.1"
+containerd {}
+cni { ranges "r0" { subnet = "10.88.0.0/24" } }
+unit { id = "u1", image = "img:1" }
+netpol { policyFile = "/etc/nayutar/policy.lkal", nftBin = "nft" }`,
+			wantErr: "nftBin",
+		},
 	}
 
 	for _, tc := range cases {
@@ -211,4 +238,91 @@ unit { id = "u1", image = "img:1" }`,
 			}
 		})
 	}
+}
+
+func TestDecodeConfigTenantBridgeAndNetpol(t *testing.T) {
+	t.Run("tenant_selects_deterministic_bridge_when_bridge_omitted", func(t *testing.T) {
+		src := `@lkal "0.1"
+containerd {}
+cni { ranges "r0" { subnet = "10.40.0.0/24", gateway = "10.40.0.1" } }
+unit { id = "u1", tenant = "alpha", image = "img:1" }
+netpol { policyFile = "/etc/nayutar/netpol.lkal" }
+`
+		cfg, err := node.DecodeConfig("tenant.lkal", []byte(src))
+		if err != nil {
+			t.Fatalf("DecodeConfig: %v", err)
+		}
+		if cfg.Unit.Tenant != "alpha" {
+			t.Fatalf("tenant = %q, want alpha", cfg.Unit.Tenant)
+		}
+		if want := netpol.TenantBridgeName("alpha"); cfg.CNI.Bridge != want {
+			t.Fatalf("bridge = %q, want %q", cfg.CNI.Bridge, want)
+		}
+		if cfg.Netpol == nil || cfg.Netpol.PolicyFile != "/etc/nayutar/netpol.lkal" || cfg.Netpol.NftBin != "/usr/sbin/nft" {
+			t.Fatalf("unexpected netpol config: %+v", cfg.Netpol)
+		}
+	})
+
+	cfgSrc := func(bridge, tenant, np string) string {
+		b := ""
+		if bridge != "" {
+			b = `bridge = "` + bridge + `", `
+		}
+		tn := ""
+		if tenant != "" {
+			tn = `, tenant = "` + tenant + `"`
+		}
+		return `@lkal "0.1"
+containerd {}
+cni { ` + b + `ranges "r0" { subnet = "10.40.0.0/24", gateway = "10.40.0.1" } }
+unit { id = "u1"` + tn + `, image = "img:1" }
+` + np
+	}
+	const np = `netpol { policyFile = "/etc/nayutar/netpol.lkal" }`
+
+	t.Run("explicit_bridge_equal_to_tenant_bridge_accepted", func(t *testing.T) {
+		want := netpol.TenantBridgeName("alpha")
+		cfg, err := node.DecodeConfig("t.lkal", []byte(cfgSrc(want, "alpha", np)))
+		if err != nil {
+			t.Fatalf("DecodeConfig: %v", err)
+		}
+		if cfg.CNI.Bridge != want {
+			t.Fatalf("bridge = %q, want %q", cfg.CNI.Bridge, want)
+		}
+	})
+
+	rejected := []struct {
+		name, src, wantErr string
+	}{
+		{"tenant_without_netpol", cfgSrc("", "alpha", ""), "requires a netpol block"},
+		{"tenant_without_netpol_explicit_bridge", cfgSrc(netpol.TenantBridgeName("alpha"), "alpha", ""), "requires a netpol block"},
+		{"tenant_with_custom_bridge", cfgSrc("custom0", "alpha", np), "must equal the tenant bridge"},
+		{"tenant_with_other_tenant_bridge", cfgSrc(netpol.TenantBridgeName("beta"), "alpha", np), "must equal the tenant bridge"},
+		{"tenant_with_default_bridge", cfgSrc("cni0", "alpha", np), "must equal the tenant bridge"},
+		{"untenanted_with_tenant_bridge", cfgSrc(netpol.TenantBridgeName("alpha"), "", np), "reserved"},
+		{"untenanted_with_tenant_bridge_no_netpol", cfgSrc(netpol.TenantBridgePrefix+"x", "", ""), "reserved"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := node.DecodeConfig("t.lkal", []byte(tc.src))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("untenanted_custom_and_default_bridge_accepted", func(t *testing.T) {
+		for _, br := range []string{"", "custom0"} {
+			cfg, err := node.DecodeConfig("t.lkal", []byte(cfgSrc(br, "", "")))
+			if err != nil {
+				t.Fatalf("bridge %q: %v", br, err)
+			}
+			if br != "" && cfg.CNI.Bridge != br {
+				t.Fatalf("bridge = %q, want %q", cfg.CNI.Bridge, br)
+			}
+			if netpol.IsTenantBridgeName(cfg.CNI.Bridge) {
+				t.Fatalf("default bridge %q is in the tenant namespace", cfg.CNI.Bridge)
+			}
+		}
+	})
 }

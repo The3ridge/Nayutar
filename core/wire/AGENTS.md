@@ -8,5 +8,5 @@
 - `watchcache.Manager.Objects` を呼ぶ前に、URL セグメント文法・クエリ引数（`continue` の `keyspace.ParseRel` を含む）・`Schemas` の登録・`tenant.Registry.Get` の `.active` 状態を検査し、未登録 kind や存在しない／削除中テナントに対するキャッシュ無限生成を防ぐ。サーバ側の `GET` 一覧応答は常に 1 頁上限 `MaxListLimit` で有界にし（`?limit=0` は `400`）、`Client.List` は `Limit == 0` のときに単一スナップショットリビジョン固定で `Continue` を自動走査する。
 - Watch ストリームは NDJSON（`\n` 区切り、1 イベントごと Flush、`Transfer-Encoding` は付けない）で配信し、開始前の `ErrTooOld` / `ErrCompacted` は HTTP `410 Gone`、配信開始後の追い越し・コンパクションは終端 `type = .error`（`kind = .gone, status = 410`）を送出して閉じる。`name` フィルタは `o/<group>/<kind>/<name>` の完全一致で `EventPut` / `EventDelete` を絞り込み、`EventBookmark` はすべて通す。
 - Go 1.27 の `http.Transport` で `http://` の prior-knowledge `h2c` を使うときは `Protocols` で `SetUnencryptedHTTP2(true)` のみを有効化する（`HTTP1` を無効のままにする）。
-- 試験のリスナーは必ず `127.0.0.1:0` のみにバインドし、`0.0.0.0` にバインドしない。`h2c` と TLS 1.3 `h2` の双方で `ProtoMajor == 2` を確かめ、3 メンバーの etcd 結合試験はビルドタグ `etcd`（`wire_etcd_test.go`）で走らせる。
+- 通常の試験は `testing/synctest` のバブル内で `sim.MemNet` にリスナーを置き、クライアントは `NewH2CClientWithNet` / `NewTLSClientWithNet` で同じ `MemNet` に繋ぐ。実ソケットも実時間の待ちも使わない（TLS 証明書の有効期間もバブルの仮想時刻）。`h2c` と TLS 1.3 `h2` の双方で `ProtoMajor == 2` を確かめ、3 メンバーの etcd 結合試験はビルドタグ `etcd`（`wire_etcd_test.go`）で、実時間のまま同じ `MemNet` 経由で走らせる。
 - まだ無いもの：G2 のタグなし決定論的 LKAL-CBOR（`+cbor` / `+cbor-seq`）、クライアント認証本体とプリンシパル別レート制限（`Config.Authenticate` と `Config.ScopeResolver` フックのみ用意）。
