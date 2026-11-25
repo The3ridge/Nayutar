@@ -503,145 +503,179 @@ func TestNoFalseNotReady(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestNoFalseNotReady")
 	const duration int64 = 300_000
+	var mu sync.Mutex
 	totalRounds := 0
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestNoFalseNotReady", seed, err.Error())
-		}
-		sim.ScheduleChaos(livesim.ChaosConfig{
-			MaxFaultyAggregators: 2,
-			MinInterval:          1_000,
-			MaxInterval:          4_000,
-			MinDuration:          2_000,
-			MaxDuration:          15_000,
-		})
-		sim.RunUntil(30_000)
-		readyAt30 := snapshotStates(sim, cfg.Nodes)
-		sim.RunUntil(duration)
-		finalStates := snapshotStates(sim, cfg.Nodes)
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestNoFalseNotReady", seed, err.Error())
+			}
+			sim.ScheduleChaos(livesim.ChaosConfig{
+				MaxFaultyAggregators: 2,
+				MinInterval:          1_000,
+				MaxInterval:          4_000,
+				MinDuration:          2_000,
+				MaxDuration:          15_000,
+			})
+			sim.RunUntil(30_000)
+			readyAt30 := snapshotStates(sim, cfg.Nodes)
+			sim.RunUntil(duration)
+			finalStates := snapshotStates(sim, cfg.Nodes)
 
-		if err := checkNoFalseNotReady(sim.Writes(), readyAt30, finalStates); err != nil {
-			failSeed(t, "TestNoFalseNotReady", seed, err.Error())
-		}
-		for _, n := range cfg.Nodes {
-			totalRounds += sim.Stats().RoundsOpened[n.Name]
-		}
+			if err := checkNoFalseNotReady(sim.Writes(), readyAt30, finalStates); err != nil {
+				failSeed(t, "TestNoFalseNotReady", seed, err.Error())
+			}
+			st := sim.Stats()
+			rounds := 0
+			for _, n := range cfg.Nodes {
+				rounds += st.RoundsOpened[n.Name]
+			}
+			mu.Lock()
+			totalRounds += rounds
+			mu.Unlock()
+		})
 	}
-	if totalRounds == 0 {
-		t.Fatalf("expected > 0 rounds opened across %d seeds, got 0", len(seedList))
-	}
-	t.Logf("TestNoFalseNotReady: seeds=%d total_rounds=%d sim_time_ms=%d", len(seedList), totalRounds, duration)
+	t.Cleanup(func() {
+		if !t.Failed() && totalRounds == 0 {
+			t.Errorf("expected > 0 rounds opened across %d seeds, got 0", len(seedList))
+		}
+		t.Logf("TestNoFalseNotReady: seeds=%d total_rounds=%d sim_time_ms=%d", len(seedList), totalRounds, duration)
+	})
 }
 
 func TestDetectsStoppedNodes(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestDetectsStoppedNodes")
+	var mu sync.Mutex
 	var allLatencies []int64
 	var totalSimTime int64
 	confirmations := 0
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestDetectsStoppedNodes", seed, err.Error())
-		}
-		sim.ScheduleChaos(livesim.ChaosConfig{
-			MaxFaultyAggregators: 1,
-			MinInterval:          1_000,
-			MaxInterval:          4_000,
-			MinDuration:          2_000,
-			MaxDuration:          12_000,
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestDetectsStoppedNodes", seed, err.Error())
+			}
+			sim.ScheduleChaos(livesim.ChaosConfig{
+				MaxFaultyAggregators: 1,
+				MinInterval:          1_000,
+				MaxInterval:          4_000,
+				MinDuration:          2_000,
+				MaxDuration:          12_000,
+			})
+			mustReadyBy(t, sim, cfg, 20_000, "TestDetectsStoppedNodes")
+
+			r := simcore.NewDetRandStream(seed, 0x73746f70)
+			rackPerm := simcore.Perm(r, 3)
+			node1 := cfg.Nodes[rackPerm[0]*10+simcore.IntN(r, 10)].Name
+			node2 := cfg.Nodes[rackPerm[1]*10+simcore.IntN(r, 10)].Name
+			t1 := int64(25_000) + r.Int64N(60_000)
+			t2 := int64(25_000) + r.Int64N(60_000)
+
+			type stopEvent struct {
+				at   int64
+				node string
+			}
+			evts := []stopEvent{{t1, node1}, {t2, node2}}
+			slices.SortFunc(evts, func(a, b stopEvent) int {
+				if a.at < b.at {
+					return -1
+				}
+				if a.at > b.at {
+					return 1
+				}
+				return strings.Compare(a.node, b.node)
+			})
+
+			stopTimes := make(map[string]int64, 2)
+			for _, ev := range evts {
+				sim.RunUntil(ev.at)
+				sim.StopNode(ev.node)
+				stopTimes[ev.node] = ev.at
+			}
+			endAt := max(t1, t2) + 45_000
+			sim.RunUntil(endAt)
+
+			writes := sim.Writes()
+			lats, err := checkStoppedDetection(writes, stopTimes, 30_000)
+			if err != nil {
+				failSeed(t, "TestDetectsStoppedNodes", seed, err.Error())
+			}
+			seedConfirmations := 0
+			for _, w := range writes {
+				if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
+					seedConfirmations++
+				}
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			confirmations += seedConfirmations
+			allLatencies = append(allLatencies, lats...)
+			mu.Unlock()
 		})
-		mustReadyBy(t, sim, cfg, 20_000, "TestDetectsStoppedNodes")
-
-		r := simcore.NewDetRandStream(seed, 0x73746f70)
-		rackPerm := simcore.Perm(r, 3)
-		node1 := cfg.Nodes[rackPerm[0]*10+simcore.IntN(r, 10)].Name
-		node2 := cfg.Nodes[rackPerm[1]*10+simcore.IntN(r, 10)].Name
-		t1 := int64(25_000) + r.Int64N(60_000)
-		t2 := int64(25_000) + r.Int64N(60_000)
-
-		type stopEvent struct {
-			at   int64
-			node string
-		}
-		evts := []stopEvent{{t1, node1}, {t2, node2}}
-		slices.SortFunc(evts, func(a, b stopEvent) int {
-			if a.at < b.at {
-				return -1
-			}
-			if a.at > b.at {
-				return 1
-			}
-			return strings.Compare(a.node, b.node)
-		})
-
-		stopTimes := make(map[string]int64, 2)
-		for _, ev := range evts {
-			sim.RunUntil(ev.at)
-			sim.StopNode(ev.node)
-			stopTimes[ev.node] = ev.at
-		}
-		endAt := max(t1, t2) + 45_000
-		sim.RunUntil(endAt)
-		totalSimTime = endAt
-
-		writes := sim.Writes()
-		lats, err := checkStoppedDetection(writes, stopTimes, 30_000)
-		if err != nil {
-			failSeed(t, "TestDetectsStoppedNodes", seed, err.Error())
-		}
-		for _, w := range writes {
-			if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
-				confirmations++
-			}
-		}
-		allLatencies = append(allLatencies, lats...)
 	}
-	maxLat, p99Lat := latencyStats(allLatencies)
-	t.Logf("TestDetectsStoppedNodes: seeds=%d notready_confirmations=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
-		len(seedList), confirmations, maxLat, p99Lat, totalSimTime)
+	t.Cleanup(func() {
+		maxLat, p99Lat := latencyStats(allLatencies)
+		t.Logf("TestDetectsStoppedNodes: seeds=%d notready_confirmations=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
+			len(seedList), confirmations, maxLat, p99Lat, totalSimTime)
+	})
 }
 
 func TestRecoversToReady(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestRecoversToReady")
+	var mu sync.Mutex
 	var lastSimTime int64
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestRecoversToReady", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestRecoversToReady")
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestRecoversToReady", seed, err.Error())
+			}
+			mustReadyBy(t, sim, cfg, 20_000, "TestRecoversToReady")
 
-		r := simcore.NewDetRandStream(seed, 0x726563)
-		target := cfg.Nodes[simcore.IntN(r, len(cfg.Nodes))].Name
-		sim.StopNode(target)
+			r := simcore.NewDetRandStream(seed, 0x726563)
+			target := cfg.Nodes[simcore.IntN(r, len(cfg.Nodes))].Name
+			sim.StopNode(target)
 
-		deadline := sim.Now() + 30_000
-		for sim.Now() < deadline && sim.Record(target).State != detector.StateNotReady {
-			sim.RunUntil(sim.Now() + 500)
-		}
-		if sim.Record(target).State != detector.StateNotReady {
-			failSeed(t, "TestRecoversToReady", seed, fmt.Sprintf("node %s did not reach NotReady before restart", target))
-		}
+			deadline := sim.Now() + 30_000
+			for sim.Now() < deadline && sim.Record(target).State != detector.StateNotReady {
+				sim.RunUntil(sim.Now() + 500)
+			}
+			if sim.Record(target).State != detector.StateNotReady {
+				failSeed(t, "TestRecoversToReady", seed, fmt.Sprintf("node %s did not reach NotReady before restart", target))
+			}
 
-		restartAt := sim.Now()
-		sim.StartNode(target)
-		sim.RunUntil(restartAt + 10_000)
-		lastSimTime = sim.Now()
+			restartAt := sim.Now()
+			sim.StartNode(target)
+			sim.RunUntil(restartAt + 10_000)
+			endAt := sim.Now()
 
-		if err := checkRecoveredToReady(sim.Writes(), target, restartAt, 10_000, sim.Record(target)); err != nil {
-			failSeed(t, "TestRecoversToReady", seed, err.Error())
-		}
+			if err := checkRecoveredToReady(sim.Writes(), target, restartAt, 10_000, sim.Record(target)); err != nil {
+				failSeed(t, "TestRecoversToReady", seed, err.Error())
+			}
+			mu.Lock()
+			if endAt > lastSimTime {
+				lastSimTime = endAt
+			}
+			mu.Unlock()
+		})
 	}
-	t.Logf("TestRecoversToReady: seeds=%d sim_time_ms=%d", len(seedList), lastSimTime)
+	t.Cleanup(func() {
+		t.Logf("TestRecoversToReady: seeds=%d sim_time_ms=%d", len(seedList), lastSimTime)
+	})
 }
 
 func TestEvictionPermitsAreRateLimited(t *testing.T) {
@@ -699,7 +733,9 @@ func TestEvictionPermitsAreRateLimited(t *testing.T) {
 			}
 			mu.Lock()
 			allLatencies = append(allLatencies, lats...)
-			totalSimTime = endAt
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
 			mu.Unlock()
 		})
 	}
@@ -713,175 +749,213 @@ func TestEvictionPermitsAreRateLimited(t *testing.T) {
 func TestSelfSuspicionWithoutWitnesses(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestSelfSuspicionWithoutWitnesses")
+	var mu sync.Mutex
 	var totalSimTime int64
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestSelfSuspicionWithoutWitnesses")
-
-		agg := cfg.Aggregators[0]
-		aggAddr := liveness.Addr{ID: agg}
-		for _, n := range cfg.Nodes {
-			nAddr := liveness.Addr{ID: n.Name, Node: true}
-			sim.Cut(aggAddr, nAddr)
-			sim.Cut(nAddr, aggAddr)
-		}
-
-		sawSuspended := false
-		cutStart := sim.Now()
-		for tms := cutStart + 1_000; tms <= cutStart+120_000; tms += 1_000 {
-			sim.RunUntil(tms)
-			if sim.Suspended(agg) {
-				sawSuspended = true
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, err.Error())
 			}
-		}
-		if !sawSuspended {
-			failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, fmt.Sprintf("%s never reported Suspended() during 120s node cut", agg))
-		}
+			mustReadyBy(t, sim, cfg, 20_000, "TestSelfSuspicionWithoutWitnesses")
 
-		for _, n := range cfg.Nodes {
-			nAddr := liveness.Addr{ID: n.Name, Node: true}
-			sim.Uncut(aggAddr, nAddr)
-			sim.Uncut(nAddr, aggAddr)
-		}
-		sim.RunUntil(sim.Now() + 30_000)
-		totalSimTime = sim.Now()
-
-		if sim.Suspended(agg) {
-			failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, fmt.Sprintf("%s remained Suspended() 30s after healing", agg))
-		}
-		if rounds := sim.Stats().RoundsOpenedByAgg[agg]; rounds < 1 {
-			failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, fmt.Sprintf("%s opened %d rounds, want >= 1", agg, rounds))
-		}
-		for _, w := range sim.Writes() {
-			if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
-				failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, fmt.Sprintf("unexpected NotReady write for %s at t=%d", w.Node, w.Time))
-			}
-		}
-	}
-	t.Logf("TestSelfSuspicionWithoutWitnesses: seeds=%d sim_time_ms=%d", len(seedList), totalSimTime)
-}
-
-func TestMassFailureIsConfirmedByWitnesses(t *testing.T) {
-	t.Parallel()
-	seedList := seeds(t, "TestMassFailureIsConfirmedByWitnesses")
-	var allLatencies []int64
-	var totalSimTime int64
-	suspendedSeeds := 0
-	confirmations := 0
-
-	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestMassFailureIsConfirmedByWitnesses", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestMassFailureIsConfirmedByWitnesses")
-
-		stopAt := sim.Now()
-		stopTimes := make(map[string]int64, 10)
-		for _, n := range cfg.Nodes {
-			if n.Rack == "rack-0" {
-				sim.StopNode(n.Name)
-				stopTimes[n.Name] = stopAt
-			}
-		}
-
-		endAt := stopAt + 420_000
-		sim.RunUntil(endAt)
-		totalSimTime = endAt
-
-		st := sim.Stats()
-		for _, agg := range cfg.Aggregators {
-			if st.SuspendedTime[agg] > 0 {
-				suspendedSeeds++
-				break
-			}
-		}
-
-		writes := sim.Writes()
-		lats, err := checkMassFailure(
-			writes,
-			stopTimes,
-			45_000,
-			detector.DefaultConfig("a", nil).EvictionGrace,
-		)
-		if err != nil {
-			failSeed(t, "TestMassFailureIsConfirmedByWitnesses", seed, err.Error())
-		}
-		if err := checkNodeProbeFailures(st, stopTimes, 1); err != nil {
-			failSeed(t, "TestMassFailureIsConfirmedByWitnesses", seed, err.Error())
-		}
-		for _, w := range writes {
-			if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
-				confirmations++
-			}
-		}
-		allLatencies = append(allLatencies, lats...)
-	}
-	if suspendedSeeds == 0 {
-		t.Fatalf("expected at least 1 seed with a suspended aggregator across %d seeds, got 0", len(seedList))
-	}
-	maxLat, p99Lat := latencyStats(allLatencies)
-	t.Logf("TestMassFailureIsConfirmedByWitnesses: seeds=%d suspended_seeds=%d notready_confirmations=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
-		len(seedList), suspendedSeeds, confirmations, maxLat, p99Lat, totalSimTime)
-}
-
-func TestControlPlanePartition(t *testing.T) {
-	t.Parallel()
-	seedList := seeds(t, "TestControlPlanePartition")
-	var totalSimTime int64
-
-	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestControlPlanePartition", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestControlPlanePartition")
-
-		for _, agg := range cfg.Aggregators {
+			agg := cfg.Aggregators[0]
 			aggAddr := liveness.Addr{ID: agg}
 			for _, n := range cfg.Nodes {
 				nAddr := liveness.Addr{ID: n.Name, Node: true}
 				sim.Cut(aggAddr, nAddr)
 				sim.Cut(nAddr, aggAddr)
 			}
-		}
-		sim.RunUntil(sim.Now() + 180_000)
 
-		stCut := sim.Stats()
-		roundsCut := 0
-		for _, agg := range cfg.Aggregators {
-			if stCut.RoundsOpenedByAgg[agg] < 1 {
-				failSeed(t, "TestControlPlanePartition", seed, fmt.Sprintf("%s opened 0 rounds during cut", agg))
+			sawSuspended := false
+			cutStart := sim.Now()
+			for tms := cutStart + 1_000; tms <= cutStart+120_000; tms += 1_000 {
+				sim.RunUntil(tms)
+				if sim.Suspended(agg) {
+					sawSuspended = true
+				}
 			}
-			if stCut.SuspendedTime[agg] <= 0 {
-				failSeed(t, "TestControlPlanePartition", seed, fmt.Sprintf("%s spent 0 ms suspended during cut", agg))
+			if !sawSuspended {
+				failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, fmt.Sprintf("%s never reported Suspended() during 120s node cut", agg))
 			}
-			roundsCut += stCut.RoundsOpenedByAgg[agg]
-		}
 
-		for _, agg := range cfg.Aggregators {
-			aggAddr := liveness.Addr{ID: agg}
 			for _, n := range cfg.Nodes {
 				nAddr := liveness.Addr{ID: n.Name, Node: true}
 				sim.Uncut(aggAddr, nAddr)
 				sim.Uncut(nAddr, aggAddr)
 			}
-		}
-		sim.RunUntil(sim.Now() + 30_000)
-		totalSimTime = sim.Now()
+			sim.RunUntil(sim.Now() + 30_000)
+			endAt := sim.Now()
 
-		if err := checkControlPlanePartition(sim.Writes(), snapshotStates(sim, cfg.Nodes), roundsCut); err != nil {
-			failSeed(t, "TestControlPlanePartition", seed, err.Error())
-		}
+			if sim.Suspended(agg) {
+				failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, fmt.Sprintf("%s remained Suspended() 30s after healing", agg))
+			}
+			if rounds := sim.Stats().RoundsOpenedByAgg[agg]; rounds < 1 {
+				failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, fmt.Sprintf("%s opened %d rounds, want >= 1", agg, rounds))
+			}
+			for _, w := range sim.Writes() {
+				if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
+					failSeed(t, "TestSelfSuspicionWithoutWitnesses", seed, fmt.Sprintf("unexpected NotReady write for %s at t=%d", w.Node, w.Time))
+				}
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			mu.Unlock()
+		})
 	}
-	t.Logf("TestControlPlanePartition: seeds=%d sim_time_ms=%d", len(seedList), totalSimTime)
+	t.Cleanup(func() {
+		t.Logf("TestSelfSuspicionWithoutWitnesses: seeds=%d sim_time_ms=%d", len(seedList), totalSimTime)
+	})
+}
+
+func TestMassFailureIsConfirmedByWitnesses(t *testing.T) {
+	t.Parallel()
+	seedList := seeds(t, "TestMassFailureIsConfirmedByWitnesses")
+	var mu sync.Mutex
+	var allLatencies []int64
+	var totalSimTime int64
+	suspendedSeeds := 0
+	confirmations := 0
+
+	for _, seed := range seedList {
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestMassFailureIsConfirmedByWitnesses", seed, err.Error())
+			}
+			mustReadyBy(t, sim, cfg, 20_000, "TestMassFailureIsConfirmedByWitnesses")
+
+			stopAt := sim.Now()
+			stopTimes := make(map[string]int64, 10)
+			for _, n := range cfg.Nodes {
+				if n.Rack == "rack-0" {
+					sim.StopNode(n.Name)
+					stopTimes[n.Name] = stopAt
+				}
+			}
+
+			endAt := stopAt + 420_000
+			sim.RunUntil(endAt)
+
+			st := sim.Stats()
+			sawSuspended := false
+			for _, agg := range cfg.Aggregators {
+				if st.SuspendedTime[agg] > 0 {
+					sawSuspended = true
+					break
+				}
+			}
+
+			writes := sim.Writes()
+			lats, err := checkMassFailure(
+				writes,
+				stopTimes,
+				45_000,
+				detector.DefaultConfig("a", nil).EvictionGrace,
+			)
+			if err != nil {
+				failSeed(t, "TestMassFailureIsConfirmedByWitnesses", seed, err.Error())
+			}
+			if err := checkNodeProbeFailures(st, stopTimes, 1); err != nil {
+				failSeed(t, "TestMassFailureIsConfirmedByWitnesses", seed, err.Error())
+			}
+			seedConfirmations := 0
+			for _, w := range writes {
+				if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
+					seedConfirmations++
+				}
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			if sawSuspended {
+				suspendedSeeds++
+			}
+			confirmations += seedConfirmations
+			allLatencies = append(allLatencies, lats...)
+			mu.Unlock()
+		})
+	}
+	t.Cleanup(func() {
+		if !t.Failed() && suspendedSeeds == 0 {
+			t.Errorf("expected at least 1 seed with a suspended aggregator across %d seeds, got 0", len(seedList))
+		}
+		maxLat, p99Lat := latencyStats(allLatencies)
+		t.Logf("TestMassFailureIsConfirmedByWitnesses: seeds=%d suspended_seeds=%d notready_confirmations=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
+			len(seedList), suspendedSeeds, confirmations, maxLat, p99Lat, totalSimTime)
+	})
+}
+
+func TestControlPlanePartition(t *testing.T) {
+	t.Parallel()
+	seedList := seeds(t, "TestControlPlanePartition")
+	var mu sync.Mutex
+	var totalSimTime int64
+
+	for _, seed := range seedList {
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestControlPlanePartition", seed, err.Error())
+			}
+			mustReadyBy(t, sim, cfg, 20_000, "TestControlPlanePartition")
+
+			for _, agg := range cfg.Aggregators {
+				aggAddr := liveness.Addr{ID: agg}
+				for _, n := range cfg.Nodes {
+					nAddr := liveness.Addr{ID: n.Name, Node: true}
+					sim.Cut(aggAddr, nAddr)
+					sim.Cut(nAddr, aggAddr)
+				}
+			}
+			sim.RunUntil(sim.Now() + 180_000)
+
+			stCut := sim.Stats()
+			roundsCut := 0
+			for _, agg := range cfg.Aggregators {
+				if stCut.RoundsOpenedByAgg[agg] < 1 {
+					failSeed(t, "TestControlPlanePartition", seed, fmt.Sprintf("%s opened 0 rounds during cut", agg))
+				}
+				if stCut.SuspendedTime[agg] <= 0 {
+					failSeed(t, "TestControlPlanePartition", seed, fmt.Sprintf("%s spent 0 ms suspended during cut", agg))
+				}
+				roundsCut += stCut.RoundsOpenedByAgg[agg]
+			}
+
+			for _, agg := range cfg.Aggregators {
+				aggAddr := liveness.Addr{ID: agg}
+				for _, n := range cfg.Nodes {
+					nAddr := liveness.Addr{ID: n.Name, Node: true}
+					sim.Uncut(aggAddr, nAddr)
+					sim.Uncut(nAddr, aggAddr)
+				}
+			}
+			sim.RunUntil(sim.Now() + 30_000)
+			endAt := sim.Now()
+
+			if err := checkControlPlanePartition(sim.Writes(), snapshotStates(sim, cfg.Nodes), roundsCut); err != nil {
+				failSeed(t, "TestControlPlanePartition", seed, err.Error())
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			mu.Unlock()
+		})
+	}
+	t.Cleanup(func() {
+		t.Logf("TestControlPlanePartition: seeds=%d sim_time_ms=%d", len(seedList), totalSimTime)
+	})
 }
 
 func TestPersistentOneWayPartition(t *testing.T) {
@@ -947,115 +1021,138 @@ func TestPersistentOneWayPartition(t *testing.T) {
 func TestOwnersSplitTwoToOne(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestOwnersSplitTwoToOne")
+	var mu sync.Mutex
 	var totalSimTime int64
 	totalRounds := 0
 	totalWrites := 0
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		cfg.Aggregators = []string{"agg-0", "agg-1", "agg-2"}
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestOwnersSplitTwoToOne", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestOwnersSplitTwoToOne")
-
-		a0 := liveness.Addr{ID: "agg-0"}
-		a1 := liveness.Addr{ID: "agg-1"}
-		a2 := liveness.Addr{ID: "agg-2"}
-		sim.Cut(a0, a2)
-		sim.Cut(a2, a0)
-		sim.Cut(a1, a2)
-		sim.Cut(a2, a1)
-		for _, n := range cfg.Nodes {
-			if n.Rack == "rack-0" {
-				nAddr := liveness.Addr{ID: n.Name, Node: true}
-				sim.Cut(a0, nAddr)
-				sim.Cut(nAddr, a0)
-				sim.Cut(a1, nAddr)
-				sim.Cut(nAddr, a1)
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			cfg.Aggregators = []string{"agg-0", "agg-1", "agg-2"}
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestOwnersSplitTwoToOne", seed, err.Error())
 			}
-		}
+			mustReadyBy(t, sim, cfg, 20_000, "TestOwnersSplitTwoToOne")
 
-		sim.RunUntil(sim.Now() + 300_000)
-		totalSimTime = sim.Now()
+			a0 := liveness.Addr{ID: "agg-0"}
+			a1 := liveness.Addr{ID: "agg-1"}
+			a2 := liveness.Addr{ID: "agg-2"}
+			sim.Cut(a0, a2)
+			sim.Cut(a2, a0)
+			sim.Cut(a1, a2)
+			sim.Cut(a2, a1)
+			for _, n := range cfg.Nodes {
+				if n.Rack == "rack-0" {
+					nAddr := liveness.Addr{ID: n.Name, Node: true}
+					sim.Cut(a0, nAddr)
+					sim.Cut(nAddr, a0)
+					sim.Cut(a1, nAddr)
+					sim.Cut(nAddr, a1)
+				}
+			}
 
-		writes := sim.Writes()
-		totalWrites += len(writes)
-		for _, w := range writes {
-			if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
-				failSeed(t, "TestOwnersSplitTwoToOne", seed,
-					fmt.Sprintf("false NotReady for %s at t=%d by %s", w.Node, w.Time, w.Aggregator))
+			sim.RunUntil(sim.Now() + 300_000)
+			endAt := sim.Now()
+
+			writes := sim.Writes()
+			for _, w := range writes {
+				if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
+					failSeed(t, "TestOwnersSplitTwoToOne", seed,
+						fmt.Sprintf("false NotReady for %s at t=%d by %s", w.Node, w.Time, w.Aggregator))
+				}
 			}
-		}
-		st := sim.Stats()
-		affectedRounds := 0
-		for _, n := range cfg.Nodes {
-			if n.Rack == "rack-0" {
-				affectedRounds += st.RoundsOpened[n.Name]
+			st := sim.Stats()
+			affectedRounds := 0
+			for _, n := range cfg.Nodes {
+				if n.Rack == "rack-0" {
+					affectedRounds += st.RoundsOpened[n.Name]
+				}
 			}
-		}
-		if affectedRounds < 1 {
-			failSeed(t, "TestOwnersSplitTwoToOne", seed, "no round opened for any affected rack-0 node")
-		}
-		totalRounds += affectedRounds
+			if affectedRounds < 1 {
+				failSeed(t, "TestOwnersSplitTwoToOne", seed, "no round opened for any affected rack-0 node")
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			totalRounds += affectedRounds
+			totalWrites += len(writes)
+			mu.Unlock()
+		})
 	}
-	t.Logf("TestOwnersSplitTwoToOne: seeds=%d affected_rounds=%d writes=%d sim_time_ms=%d",
-		len(seedList), totalRounds, totalWrites, totalSimTime)
+	t.Cleanup(func() {
+		t.Logf("TestOwnersSplitTwoToOne: seeds=%d affected_rounds=%d writes=%d sim_time_ms=%d",
+			len(seedList), totalRounds, totalWrites, totalSimTime)
+	})
 }
 
 func TestMajorityCutIsDamped(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestMajorityCutIsDamped")
+	var mu sync.Mutex
 	maxCount := 0
 	totalRounds := 0
 	var totalSimTime int64
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestMajorityCutIsDamped", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestMajorityCutIsDamped")
-
-		target := cfg.Nodes[0].Name
-		owners := hrw.Ranked(target, cfg.Aggregators)[:3]
-		keeper := owners[0]
-		nAddr := liveness.Addr{ID: target, Node: true}
-		for _, agg := range cfg.Aggregators {
-			if agg == keeper {
-				continue
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestMajorityCutIsDamped", seed, err.Error())
 			}
-			aggAddr := liveness.Addr{ID: agg}
-			sim.Cut(aggAddr, nAddr)
-			sim.Cut(nAddr, aggAddr)
-		}
+			mustReadyBy(t, sim, cfg, 20_000, "TestMajorityCutIsDamped")
 
-		sim.RunUntil(sim.Now() + 20*60_000)
-		totalSimTime = sim.Now()
+			target := cfg.Nodes[0].Name
+			owners := hrw.Ranked(target, cfg.Aggregators)[:3]
+			keeper := owners[0]
+			nAddr := liveness.Addr{ID: target, Node: true}
+			for _, agg := range cfg.Aggregators {
+				if agg == keeper {
+					continue
+				}
+				aggAddr := liveness.Addr{ID: agg}
+				sim.Cut(aggAddr, nAddr)
+				sim.Cut(nAddr, aggAddr)
+			}
 
-		rounds := sim.Stats().RoundsOpened[target]
-		if rounds < 1 {
-			failSeed(t, "TestMajorityCutIsDamped", seed, fmt.Sprintf("no round opened for %s", target))
-		}
-		totalRounds += rounds
+			sim.RunUntil(sim.Now() + 20*60_000)
+			endAt := sim.Now()
 
-		count, err := checkMajorityCutDamped(sim.Writes(), target, 60)
-		if err != nil {
-			failSeed(t, "TestMajorityCutIsDamped", seed, err.Error())
-		}
-		if count > maxCount {
-			maxCount = count
-		}
+			rounds := sim.Stats().RoundsOpened[target]
+			if rounds < 1 {
+				failSeed(t, "TestMajorityCutIsDamped", seed, fmt.Sprintf("no round opened for %s", target))
+			}
+
+			count, err := checkMajorityCutDamped(sim.Writes(), target, 60)
+			if err != nil {
+				failSeed(t, "TestMajorityCutIsDamped", seed, err.Error())
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			totalRounds += rounds
+			if count > maxCount {
+				maxCount = count
+			}
+			mu.Unlock()
+		})
 	}
-	t.Logf("TestMajorityCutIsDamped: seeds=%d total_rounds=%d max_writes=%d sim_time_ms=%d",
-		len(seedList), totalRounds, maxCount, totalSimTime)
+	t.Cleanup(func() {
+		t.Logf("TestMajorityCutIsDamped: seeds=%d total_rounds=%d max_writes=%d sim_time_ms=%d",
+			len(seedList), totalRounds, maxCount, totalSimTime)
+	})
 }
 
 func TestDeterministic(t *testing.T) {
 	t.Parallel()
-	runScenario := func(seed uint64) (string, []livesim.Write) {
+	runScenario := func(t *testing.T, seed uint64) (string, []livesim.Write) {
+		t.Helper()
 		cfg := livesim.DefaultConfig(seed)
 		sim, err := livesim.New(cfg)
 		if err != nil {
@@ -1081,80 +1178,97 @@ func TestDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := seedList[0]
-	h0, w0 := runScenario(s)
-	for run := range 100 {
-		h, w := runScenario(s)
-		if h != h0 || !slices.Equal(w, w0) {
-			failSeed(t, "TestDeterministic", s, fmt.Sprintf("non-deterministic run %d: hash0=%s hash=%s", run, h0, h))
-		}
-	}
-	hDiff, _ := runScenario(s ^ 0x9e3779b97f4a7c15)
+	h0, w0 := runScenario(t, s)
+	hDiff, _ := runScenario(t, s^0x9e3779b97f4a7c15)
 	if h0 == hDiff {
 		failSeed(t, "TestDeterministic", s, fmt.Sprintf("different seeds produced identical hash %s", h0))
 	}
-	t.Logf("TestDeterministic: seed=%d runs=100 sim_time_ms=50000", s)
+	for run := range 100 {
+		t.Run(fmt.Sprintf("run_%d", run), func(t *testing.T) {
+			t.Parallel()
+			h, w := runScenario(t, s)
+			if h != h0 || !slices.Equal(w, w0) {
+				failSeed(t, "TestDeterministic", s, fmt.Sprintf("non-deterministic run %d: hash0=%s hash=%s", run, h0, h))
+			}
+		})
+	}
+	t.Cleanup(func() {
+		t.Logf("TestDeterministic: seed=%d runs=100 sim_time_ms=50000", s)
+	})
 }
 
 func TestRackFailureBelowSelfSuspicion(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestRackFailureBelowSelfSuspicion")
+	var mu sync.Mutex
 	var allLatencies []int64
 	var totalSimTime int64
 	confirmations := 0
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		nodes := make([]livesim.NodeConfig, 60)
-		for i := range 60 {
-			nodes[i] = livesim.NodeConfig{
-				Name: fmt.Sprintf("node-%02d", i),
-				Rack: fmt.Sprintf("rack-%d", i/10),
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			nodes := make([]livesim.NodeConfig, 60)
+			for i := range 60 {
+				nodes[i] = livesim.NodeConfig{
+					Name: fmt.Sprintf("node-%02d", i),
+					Rack: fmt.Sprintf("rack-%d", i/10),
+				}
 			}
-		}
-		cfg.Nodes = nodes
+			cfg.Nodes = nodes
 
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestRackFailureBelowSelfSuspicion", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestRackFailureBelowSelfSuspicion")
-
-		stopAt := sim.Now()
-		stopTimes := make(map[string]int64, 10)
-		for _, n := range cfg.Nodes {
-			if n.Rack == "rack-0" {
-				sim.StopNode(n.Name)
-				stopTimes[n.Name] = stopAt
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestRackFailureBelowSelfSuspicion", seed, err.Error())
 			}
-		}
+			mustReadyBy(t, sim, cfg, 20_000, "TestRackFailureBelowSelfSuspicion")
 
-		endAt := stopAt + 60_000
-		sim.RunUntil(endAt)
-		totalSimTime = endAt
-
-		st := sim.Stats()
-		if err := checkNoSuspendedAggregators(st, cfg.Aggregators); err != nil {
-			failSeed(t, "TestRackFailureBelowSelfSuspicion", seed, err.Error())
-		}
-		if err := checkNodeProbeFailures(st, stopTimes, 1); err != nil {
-			failSeed(t, "TestRackFailureBelowSelfSuspicion", seed, err.Error())
-		}
-
-		writes := sim.Writes()
-		lats, err := checkStoppedDetection(writes, stopTimes, 45_000)
-		if err != nil {
-			failSeed(t, "TestRackFailureBelowSelfSuspicion", seed, err.Error())
-		}
-		for _, w := range writes {
-			if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
-				confirmations++
+			stopAt := sim.Now()
+			stopTimes := make(map[string]int64, 10)
+			for _, n := range cfg.Nodes {
+				if n.Rack == "rack-0" {
+					sim.StopNode(n.Name)
+					stopTimes[n.Name] = stopAt
+				}
 			}
-		}
-		allLatencies = append(allLatencies, lats...)
+
+			endAt := stopAt + 60_000
+			sim.RunUntil(endAt)
+
+			st := sim.Stats()
+			if err := checkNoSuspendedAggregators(st, cfg.Aggregators); err != nil {
+				failSeed(t, "TestRackFailureBelowSelfSuspicion", seed, err.Error())
+			}
+			if err := checkNodeProbeFailures(st, stopTimes, 1); err != nil {
+				failSeed(t, "TestRackFailureBelowSelfSuspicion", seed, err.Error())
+			}
+
+			writes := sim.Writes()
+			lats, err := checkStoppedDetection(writes, stopTimes, 45_000)
+			if err != nil {
+				failSeed(t, "TestRackFailureBelowSelfSuspicion", seed, err.Error())
+			}
+			seedConfirmations := 0
+			for _, w := range writes {
+				if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
+					seedConfirmations++
+				}
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			confirmations += seedConfirmations
+			allLatencies = append(allLatencies, lats...)
+			mu.Unlock()
+		})
 	}
-	maxLat, p99Lat := latencyStats(allLatencies)
-	t.Logf("TestRackFailureBelowSelfSuspicion: seeds=%d notready_confirmations=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
-		len(seedList), confirmations, maxLat, p99Lat, totalSimTime)
+	t.Cleanup(func() {
+		maxLat, p99Lat := latencyStats(allLatencies)
+		t.Logf("TestRackFailureBelowSelfSuspicion: seeds=%d notready_confirmations=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
+			len(seedList), confirmations, maxLat, p99Lat, totalSimTime)
+	})
 }
 
 func TestSmallClusterControlPlanePartition(t *testing.T) {
@@ -1188,52 +1302,64 @@ func TestSmallClusterControlPlanePartition(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			testName := "TestSmallClusterControlPlanePartition/" + tc.name
+			var mu sync.Mutex
 			totalRounds := 0
 			var totalSimTime int64
 			for _, seed := range seedList {
-				cfg := livesim.DefaultConfig(seed)
-				cfg.Aggregators = tc.aggs
-				cfg.Nodes = tc.nodes
-				sim, err := livesim.New(cfg)
-				if err != nil {
-					failSeed(t, "TestSmallClusterControlPlanePartition", seed, err.Error())
-				}
-				mustReadyBy(t, sim, cfg, 20_000, "TestSmallClusterControlPlanePartition")
-
-				for _, agg := range cfg.Aggregators {
-					aggAddr := liveness.Addr{ID: agg}
-					for _, n := range cfg.Nodes {
-						nAddr := liveness.Addr{ID: n.Name, Node: true}
-						sim.Cut(aggAddr, nAddr)
-						sim.Cut(nAddr, aggAddr)
+				t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+					t.Parallel()
+					cfg := livesim.DefaultConfig(seed)
+					cfg.Aggregators = tc.aggs
+					cfg.Nodes = tc.nodes
+					sim, err := livesim.New(cfg)
+					if err != nil {
+						failSeed(t, testName, seed, err.Error())
 					}
-				}
-				sim.RunUntil(sim.Now() + 120_000)
+					mustReadyBy(t, sim, cfg, 20_000, testName)
 
-				stCut := sim.Stats()
-				roundsCut := 0
-				for _, agg := range cfg.Aggregators {
-					roundsCut += stCut.RoundsOpenedByAgg[agg]
-				}
-
-				for _, agg := range cfg.Aggregators {
-					aggAddr := liveness.Addr{ID: agg}
-					for _, n := range cfg.Nodes {
-						nAddr := liveness.Addr{ID: n.Name, Node: true}
-						sim.Uncut(aggAddr, nAddr)
-						sim.Uncut(nAddr, aggAddr)
+					for _, agg := range cfg.Aggregators {
+						aggAddr := liveness.Addr{ID: agg}
+						for _, n := range cfg.Nodes {
+							nAddr := liveness.Addr{ID: n.Name, Node: true}
+							sim.Cut(aggAddr, nAddr)
+							sim.Cut(nAddr, aggAddr)
+						}
 					}
-				}
-				sim.RunUntil(sim.Now() + 30_000)
-				totalSimTime = sim.Now()
+					sim.RunUntil(sim.Now() + 120_000)
 
-				if err := checkControlPlanePartition(sim.Writes(), snapshotStates(sim, cfg.Nodes), roundsCut); err != nil {
-					failSeed(t, "TestSmallClusterControlPlanePartition", seed, fmt.Sprintf("%s: %v", tc.name, err))
-				}
-				totalRounds += roundsCut
+					stCut := sim.Stats()
+					roundsCut := 0
+					for _, agg := range cfg.Aggregators {
+						roundsCut += stCut.RoundsOpenedByAgg[agg]
+					}
+
+					for _, agg := range cfg.Aggregators {
+						aggAddr := liveness.Addr{ID: agg}
+						for _, n := range cfg.Nodes {
+							nAddr := liveness.Addr{ID: n.Name, Node: true}
+							sim.Uncut(aggAddr, nAddr)
+							sim.Uncut(nAddr, aggAddr)
+						}
+					}
+					sim.RunUntil(sim.Now() + 30_000)
+					endAt := sim.Now()
+
+					if err := checkControlPlanePartition(sim.Writes(), snapshotStates(sim, cfg.Nodes), roundsCut); err != nil {
+						failSeed(t, testName, seed, fmt.Sprintf("%s: %v", tc.name, err))
+					}
+					mu.Lock()
+					if endAt > totalSimTime {
+						totalSimTime = endAt
+					}
+					totalRounds += roundsCut
+					mu.Unlock()
+				})
 			}
-			t.Logf("TestSmallClusterControlPlanePartition/%s: seeds=%d total_rounds=%d sim_time_ms=%d",
-				tc.name, len(seedList), totalRounds, totalSimTime)
+			t.Cleanup(func() {
+				t.Logf("%s: seeds=%d total_rounds=%d sim_time_ms=%d",
+					testName, len(seedList), totalRounds, totalSimTime)
+			})
 		})
 	}
 }
@@ -1253,53 +1379,65 @@ func TestLoneOwnedNodeControlPlanePartition(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			testName := "TestLoneOwnedNodeControlPlanePartition/" + tc.name
 			aggs, nodes := distinctRackTopology(tc.numAggs, tc.numNodes)
+			var mu sync.Mutex
 			totalRounds := 0
 			totalUnownedReqs := 0
 			var totalSimTime int64
 
 			for _, seed := range seedList {
-				cfg := livesim.DefaultConfig(seed)
-				cfg.Aggregators = aggs
-				cfg.Nodes = nodes
-				sim, err := livesim.New(cfg)
-				if err != nil {
-					failSeed(t, "TestLoneOwnedNodeControlPlanePartition", seed, err.Error())
-				}
-				loneAggs, err := checkLoneAggregatorOwnership(cfg.Aggregators, cfg.Nodes, sim.Owners)
-				if err != nil {
-					failSeed(t, "TestLoneOwnedNodeControlPlanePartition", seed, fmt.Sprintf("%s: %v", tc.name, err))
-				}
-				mustReadyBy(t, sim, cfg, 20_000, "TestLoneOwnedNodeControlPlanePartition")
+				t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+					t.Parallel()
+					cfg := livesim.DefaultConfig(seed)
+					cfg.Aggregators = aggs
+					cfg.Nodes = nodes
+					sim, err := livesim.New(cfg)
+					if err != nil {
+						failSeed(t, testName, seed, err.Error())
+					}
+					loneAggs, err := checkLoneAggregatorOwnership(cfg.Aggregators, cfg.Nodes, sim.Owners)
+					if err != nil {
+						failSeed(t, testName, seed, fmt.Sprintf("%s: %v", tc.name, err))
+					}
+					mustReadyBy(t, sim, cfg, 20_000, testName)
 
-				setControlPlaneCuts(sim, cfg.Aggregators, cfg.Nodes, true)
-				sim.RunUntil(sim.Now() + 120_000)
+					setControlPlaneCuts(sim, cfg.Aggregators, cfg.Nodes, true)
+					sim.RunUntil(sim.Now() + 120_000)
 
-				stCut := sim.Stats()
-				roundsCut := 0
-				for _, agg := range cfg.Aggregators {
-					roundsCut += stCut.RoundsOpenedByAgg[agg]
-				}
-				unownedReqs, err := checkUnownedNodeProbeRequests(stCut, loneAggs)
-				if err != nil {
-					failSeed(t, "TestLoneOwnedNodeControlPlanePartition", seed, fmt.Sprintf("%s: %v", tc.name, err))
-				}
+					stCut := sim.Stats()
+					roundsCut := 0
+					for _, agg := range cfg.Aggregators {
+						roundsCut += stCut.RoundsOpenedByAgg[agg]
+					}
+					unownedReqs, err := checkUnownedNodeProbeRequests(stCut, loneAggs)
+					if err != nil {
+						failSeed(t, testName, seed, fmt.Sprintf("%s: %v", tc.name, err))
+					}
 
-				setControlPlaneCuts(sim, cfg.Aggregators, cfg.Nodes, false)
-				sim.RunUntil(sim.Now() + 30_000)
-				totalSimTime = sim.Now()
+					setControlPlaneCuts(sim, cfg.Aggregators, cfg.Nodes, false)
+					sim.RunUntil(sim.Now() + 30_000)
+					endAt := sim.Now()
 
-				if err := checkControlPlanePartition(sim.Writes(), snapshotStates(sim, cfg.Nodes), roundsCut); err != nil {
-					failSeed(t, "TestLoneOwnedNodeControlPlanePartition", seed, fmt.Sprintf("%s: %v", tc.name, err))
-				}
-				if err := checkNoEvictionPermits(sim.Writes(), sim.Grants(), snapshotRecords(sim, cfg.Nodes)); err != nil {
-					failSeed(t, "TestLoneOwnedNodeControlPlanePartition", seed, fmt.Sprintf("%s: %v", tc.name, err))
-				}
-				totalRounds += roundsCut
-				totalUnownedReqs += unownedReqs
+					if err := checkControlPlanePartition(sim.Writes(), snapshotStates(sim, cfg.Nodes), roundsCut); err != nil {
+						failSeed(t, testName, seed, fmt.Sprintf("%s: %v", tc.name, err))
+					}
+					if err := checkNoEvictionPermits(sim.Writes(), sim.Grants(), snapshotRecords(sim, cfg.Nodes)); err != nil {
+						failSeed(t, testName, seed, fmt.Sprintf("%s: %v", tc.name, err))
+					}
+					mu.Lock()
+					if endAt > totalSimTime {
+						totalSimTime = endAt
+					}
+					totalRounds += roundsCut
+					totalUnownedReqs += unownedReqs
+					mu.Unlock()
+				})
 			}
-			t.Logf("TestLoneOwnedNodeControlPlanePartition/%s: seeds=%d total_rounds=%d unowned_probe_reqs=%d sim_time_ms=%d",
-				tc.name, len(seedList), totalRounds, totalUnownedReqs, totalSimTime)
+			t.Cleanup(func() {
+				t.Logf("%s: seeds=%d total_rounds=%d unowned_probe_reqs=%d sim_time_ms=%d",
+					testName, len(seedList), totalRounds, totalUnownedReqs, totalSimTime)
+			})
 		})
 	}
 }
@@ -1308,214 +1446,258 @@ func TestLoneOwnedNodeCutFromAllAggregators(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestLoneOwnedNodeCutFromAllAggregators")
 	aggs, nodes := distinctRackTopology(5, 2)
+	var mu sync.Mutex
 	var allLatencies []int64
 	var totalSimTime int64
 	totalRounds := 0
 	totalUnownedReqs := 0
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		cfg.Aggregators = aggs
-		cfg.Nodes = nodes
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
-		}
-		loneAggs, err := checkLoneAggregatorOwnership(cfg.Aggregators, cfg.Nodes, sim.Owners)
-		if err != nil {
-			failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
-		}
-		target := ""
-		for _, n := range cfg.Nodes {
-			if slices.Contains(sim.Owners(n.Name), loneAggs[0]) {
-				target = n.Name
-				break
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			cfg.Aggregators = aggs
+			cfg.Nodes = nodes
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
 			}
-		}
+			loneAggs, err := checkLoneAggregatorOwnership(cfg.Aggregators, cfg.Nodes, sim.Owners)
+			if err != nil {
+				failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
+			}
+			target := ""
+			for _, n := range cfg.Nodes {
+				if slices.Contains(sim.Owners(n.Name), loneAggs[0]) {
+					target = n.Name
+					break
+				}
+			}
 
-		mustReadyBy(t, sim, cfg, 20_000, "TestLoneOwnedNodeCutFromAllAggregators")
-		readyAt20 := snapshotStates(sim, cfg.Nodes)
+			mustReadyBy(t, sim, cfg, 20_000, "TestLoneOwnedNodeCutFromAllAggregators")
+			readyAt20 := snapshotStates(sim, cfg.Nodes)
 
-		setNodeAggCuts(sim, target, cfg.Aggregators, true)
-		sim.RunUntil(sim.Now() + 120_000)
+			setNodeAggCuts(sim, target, cfg.Aggregators, true)
+			sim.RunUntil(sim.Now() + 120_000)
 
-		stCut := sim.Stats()
-		rounds := stCut.RoundsOpened[target]
-		if rounds < 1 {
-			failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, fmt.Sprintf("no rounds opened for %s during cut", target))
-		}
-		unownedReqs, err := checkUnownedNodeProbeRequests(stCut, []string{loneAggs[0]})
-		if err != nil {
-			failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
-		}
+			stCut := sim.Stats()
+			rounds := stCut.RoundsOpened[target]
+			if rounds < 1 {
+				failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, fmt.Sprintf("no rounds opened for %s during cut", target))
+			}
+			unownedReqs, err := checkUnownedNodeProbeRequests(stCut, []string{loneAggs[0]})
+			if err != nil {
+				failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
+			}
 
-		setNodeAggCuts(sim, target, cfg.Aggregators, false)
-		sim.RunUntil(sim.Now() + 30_000)
-		if err := checkNoFalseNotReady(sim.Writes(), readyAt20, snapshotStates(sim, cfg.Nodes)); err != nil {
-			failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
-		}
-		if err := checkNoEvictionPermits(sim.Writes(), sim.Grants(), snapshotRecords(sim, cfg.Nodes)); err != nil {
-			failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
-		}
+			setNodeAggCuts(sim, target, cfg.Aggregators, false)
+			sim.RunUntil(sim.Now() + 30_000)
+			if err := checkNoFalseNotReady(sim.Writes(), readyAt20, snapshotStates(sim, cfg.Nodes)); err != nil {
+				failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
+			}
+			if err := checkNoEvictionPermits(sim.Writes(), sim.Grants(), snapshotRecords(sim, cfg.Nodes)); err != nil {
+				failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
+			}
 
-		stopAt := sim.Now()
-		sim.StopNode(target)
-		sim.RunUntil(stopAt + 40_000)
-		totalSimTime = sim.Now()
+			stopAt := sim.Now()
+			sim.StopNode(target)
+			sim.RunUntil(stopAt + 40_000)
+			endAt := sim.Now()
 
-		lats, err := checkStoppedDetection(sim.Writes(), map[string]int64{target: stopAt}, 30_000)
-		if err != nil {
-			failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
-		}
-		allLatencies = append(allLatencies, lats...)
-		totalRounds += rounds
-		totalUnownedReqs += unownedReqs
+			lats, err := checkStoppedDetection(sim.Writes(), map[string]int64{target: stopAt}, 30_000)
+			if err != nil {
+				failSeed(t, "TestLoneOwnedNodeCutFromAllAggregators", seed, err.Error())
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			allLatencies = append(allLatencies, lats...)
+			totalRounds += rounds
+			totalUnownedReqs += unownedReqs
+			mu.Unlock()
+		})
 	}
-	maxLat, p99Lat := latencyStats(allLatencies)
-	t.Logf("TestLoneOwnedNodeCutFromAllAggregators: seeds=%d total_rounds=%d unowned_probe_reqs=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
-		len(seedList), totalRounds, totalUnownedReqs, maxLat, p99Lat, totalSimTime)
+	t.Cleanup(func() {
+		maxLat, p99Lat := latencyStats(allLatencies)
+		t.Logf("TestLoneOwnedNodeCutFromAllAggregators: seeds=%d total_rounds=%d unowned_probe_reqs=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
+			len(seedList), totalRounds, totalUnownedReqs, maxLat, p99Lat, totalSimTime)
+	})
 }
 
 func TestLoneOwnedNodeLongPartitionGrantsNoEviction(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction")
 	aggs, nodes := distinctRackTopology(5, 2)
+	var mu sync.Mutex
 	totalRounds := 0
 	totalUnownedReqs := 0
 	var totalSimTime int64
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		cfg.Aggregators = aggs
-		cfg.Nodes = nodes
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
-		}
-		loneAggs, err := checkLoneAggregatorOwnership(cfg.Aggregators, cfg.Nodes, sim.Owners)
-		if err != nil {
-			failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestLoneOwnedNodeLongPartitionGrantsNoEviction")
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			cfg.Aggregators = aggs
+			cfg.Nodes = nodes
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
+			}
+			loneAggs, err := checkLoneAggregatorOwnership(cfg.Aggregators, cfg.Nodes, sim.Owners)
+			if err != nil {
+				failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
+			}
+			mustReadyBy(t, sim, cfg, 20_000, "TestLoneOwnedNodeLongPartitionGrantsNoEviction")
 
-		setControlPlaneCuts(sim, cfg.Aggregators, cfg.Nodes, true)
-		sim.RunUntil(sim.Now() + 420_000)
-		totalSimTime = sim.Now()
+			setControlPlaneCuts(sim, cfg.Aggregators, cfg.Nodes, true)
+			sim.RunUntil(sim.Now() + 420_000)
+			endAt := sim.Now()
 
-		stCut := sim.Stats()
-		roundsCut := 0
-		for _, agg := range cfg.Aggregators {
-			roundsCut += stCut.RoundsOpenedByAgg[agg]
-		}
-		unownedReqs, err := checkUnownedNodeProbeRequests(stCut, loneAggs)
-		if err != nil {
-			failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
-		}
-		if err := checkControlPlanePartition(sim.Writes(), snapshotStates(sim, cfg.Nodes), roundsCut); err != nil {
-			failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
-		}
-		if err := checkNoEvictionPermits(sim.Writes(), sim.Grants(), snapshotRecords(sim, cfg.Nodes)); err != nil {
-			failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
-		}
-		totalRounds += roundsCut
-		totalUnownedReqs += unownedReqs
+			stCut := sim.Stats()
+			roundsCut := 0
+			for _, agg := range cfg.Aggregators {
+				roundsCut += stCut.RoundsOpenedByAgg[agg]
+			}
+			unownedReqs, err := checkUnownedNodeProbeRequests(stCut, loneAggs)
+			if err != nil {
+				failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
+			}
+			if err := checkControlPlanePartition(sim.Writes(), snapshotStates(sim, cfg.Nodes), roundsCut); err != nil {
+				failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
+			}
+			if err := checkNoEvictionPermits(sim.Writes(), sim.Grants(), snapshotRecords(sim, cfg.Nodes)); err != nil {
+				failSeed(t, "TestLoneOwnedNodeLongPartitionGrantsNoEviction", seed, err.Error())
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			totalRounds += roundsCut
+			totalUnownedReqs += unownedReqs
+			mu.Unlock()
+		})
 	}
-	t.Logf("TestLoneOwnedNodeLongPartitionGrantsNoEviction: seeds=%d total_rounds=%d unowned_probe_reqs=%d sim_time_ms=%d",
-		len(seedList), totalRounds, totalUnownedReqs, totalSimTime)
+	t.Cleanup(func() {
+		t.Logf("TestLoneOwnedNodeLongPartitionGrantsNoEviction: seeds=%d total_rounds=%d unowned_probe_reqs=%d sim_time_ms=%d",
+			len(seedList), totalRounds, totalUnownedReqs, totalSimTime)
+	})
 }
 
 func TestSingleRelayUnderLoss(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestSingleRelayUnderLoss")
 	aggs, nodes := distinctRackTopology(3, 2)
+	var mu sync.Mutex
 	totalRounds := 0
 	totalFailedProbeResults := 0
 	var totalSimTime int64
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		cfg.Aggregators = aggs
-		cfg.Nodes = nodes
-		cfg.Loss = 0.05
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestSingleRelayUnderLoss", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestSingleRelayUnderLoss")
-		readyAt20 := snapshotStates(sim, cfg.Nodes)
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			cfg.Aggregators = aggs
+			cfg.Nodes = nodes
+			cfg.Loss = 0.05
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestSingleRelayUnderLoss", seed, err.Error())
+			}
+			mustReadyBy(t, sim, cfg, 20_000, "TestSingleRelayUnderLoss")
+			readyAt20 := snapshotStates(sim, cfg.Nodes)
 
-		cutNode := cfg.Nodes[0].Name
-		setNodeAggCuts(sim, cutNode, cfg.Aggregators, true)
-		sim.RunUntil(sim.Now() + 20*60_000)
-		totalSimTime = sim.Now()
+			cutNode := cfg.Nodes[0].Name
+			setNodeAggCuts(sim, cutNode, cfg.Aggregators, true)
+			sim.RunUntil(sim.Now() + 20*60_000)
+			endAt := sim.Now()
 
-		if err := checkNoFalseNotReady(sim.Writes(), readyAt20, snapshotStates(sim, cfg.Nodes)); err != nil {
-			failSeed(t, "TestSingleRelayUnderLoss", seed, err.Error())
-		}
-		st := sim.Stats()
-		rounds := st.RoundsOpened[cutNode]
-		if rounds < 1 {
-			failSeed(t, "TestSingleRelayUnderLoss", seed, fmt.Sprintf("no rounds opened for %s", cutNode))
-		}
-		totalRounds += rounds
-		totalFailedProbeResults += st.NodeProbeResultsFailed[cutNode]
+			if err := checkNoFalseNotReady(sim.Writes(), readyAt20, snapshotStates(sim, cfg.Nodes)); err != nil {
+				failSeed(t, "TestSingleRelayUnderLoss", seed, err.Error())
+			}
+			st := sim.Stats()
+			rounds := st.RoundsOpened[cutNode]
+			if rounds < 1 {
+				failSeed(t, "TestSingleRelayUnderLoss", seed, fmt.Sprintf("no rounds opened for %s", cutNode))
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			totalRounds += rounds
+			totalFailedProbeResults += st.NodeProbeResultsFailed[cutNode]
+			mu.Unlock()
+		})
 	}
-	t.Logf("TestSingleRelayUnderLoss: seeds=%d total_rounds=%d failed_probe_results=%d sim_time_ms=%d",
-		len(seedList), totalRounds, totalFailedProbeResults, totalSimTime)
+	t.Cleanup(func() {
+		t.Logf("TestSingleRelayUnderLoss: seeds=%d total_rounds=%d failed_probe_results=%d sim_time_ms=%d",
+			len(seedList), totalRounds, totalFailedProbeResults, totalSimTime)
+	})
 }
 
 func TestCrashAfterHealedCut(t *testing.T) {
 	t.Parallel()
 	seedList := seeds(t, "TestCrashAfterHealedCut")
+	var mu sync.Mutex
 	var allLatencies []int64
 	var totalSimTime int64
 
 	for _, seed := range seedList {
-		cfg := livesim.DefaultConfig(seed)
-		sim, err := livesim.New(cfg)
-		if err != nil {
-			failSeed(t, "TestCrashAfterHealedCut", seed, err.Error())
-		}
-		mustReadyBy(t, sim, cfg, 20_000, "TestCrashAfterHealedCut")
-
-		r := simcore.NewDetRandStream(seed, 0x6865616c)
-		target := cfg.Nodes[simcore.IntN(r, len(cfg.Nodes))].Name
-		owners := hrw.Ranked(target, cfg.Aggregators)[:3]
-		nAddr := liveness.Addr{ID: target, Node: true}
-		for _, owner := range owners {
-			sim.Cut(nAddr, liveness.Addr{ID: owner})
-		}
-
-		sim.RunUntil(sim.Now() + 190_000)
-		for _, w := range sim.Writes() {
-			if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
-				failSeed(t, "TestCrashAfterHealedCut", seed,
-					fmt.Sprintf("unexpected NotReady write for %s at t=%d during one-way cut", w.Node, w.Time))
+		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			cfg := livesim.DefaultConfig(seed)
+			sim, err := livesim.New(cfg)
+			if err != nil {
+				failSeed(t, "TestCrashAfterHealedCut", seed, err.Error())
 			}
-		}
-		if rounds := sim.Stats().RoundsOpened[target]; rounds < 1 {
-			failSeed(t, "TestCrashAfterHealedCut", seed, fmt.Sprintf("no rounds opened for %s during cut", target))
-		}
+			mustReadyBy(t, sim, cfg, 20_000, "TestCrashAfterHealedCut")
 
-		for _, owner := range owners {
-			sim.Uncut(nAddr, liveness.Addr{ID: owner})
-		}
-		sim.RunUntil(sim.Now() + 3_000)
+			r := simcore.NewDetRandStream(seed, 0x6865616c)
+			target := cfg.Nodes[simcore.IntN(r, len(cfg.Nodes))].Name
+			owners := hrw.Ranked(target, cfg.Aggregators)[:3]
+			nAddr := liveness.Addr{ID: target, Node: true}
+			for _, owner := range owners {
+				sim.Cut(nAddr, liveness.Addr{ID: owner})
+			}
 
-		stopAt := sim.Now()
-		sim.StopNode(target)
-		sim.RunUntil(stopAt + 40_000)
-		totalSimTime = sim.Now()
+			sim.RunUntil(sim.Now() + 190_000)
+			for _, w := range sim.Writes() {
+				if w.Kind == liveness.ProposeNotReady && w.Outcome == liveness.Committed {
+					failSeed(t, "TestCrashAfterHealedCut", seed,
+						fmt.Sprintf("unexpected NotReady write for %s at t=%d during one-way cut", w.Node, w.Time))
+				}
+			}
+			if rounds := sim.Stats().RoundsOpened[target]; rounds < 1 {
+				failSeed(t, "TestCrashAfterHealedCut", seed, fmt.Sprintf("no rounds opened for %s during cut", target))
+			}
 
-		lats, err := checkStoppedDetection(sim.Writes(), map[string]int64{target: stopAt}, 30_000)
-		if err != nil {
-			failSeed(t, "TestCrashAfterHealedCut", seed, err.Error())
-		}
-		allLatencies = append(allLatencies, lats...)
+			for _, owner := range owners {
+				sim.Uncut(nAddr, liveness.Addr{ID: owner})
+			}
+			sim.RunUntil(sim.Now() + 3_000)
+
+			stopAt := sim.Now()
+			sim.StopNode(target)
+			sim.RunUntil(stopAt + 40_000)
+			endAt := sim.Now()
+
+			lats, err := checkStoppedDetection(sim.Writes(), map[string]int64{target: stopAt}, 30_000)
+			if err != nil {
+				failSeed(t, "TestCrashAfterHealedCut", seed, err.Error())
+			}
+			mu.Lock()
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
+			allLatencies = append(allLatencies, lats...)
+			mu.Unlock()
+		})
 	}
-	maxLat, p99Lat := latencyStats(allLatencies)
-	t.Logf("TestCrashAfterHealedCut: seeds=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
-		len(seedList), maxLat, p99Lat, totalSimTime)
+	t.Cleanup(func() {
+		maxLat, p99Lat := latencyStats(allLatencies)
+		t.Logf("TestCrashAfterHealedCut: seeds=%d max_latency_ms=%d p99_latency_ms=%d sim_time_ms=%d",
+			len(seedList), maxLat, p99Lat, totalSimTime)
+	})
 }
 
 func TestEvictionsUnderChaos(t *testing.T) {
@@ -1585,7 +1767,9 @@ func TestEvictionsUnderChaos(t *testing.T) {
 			if permits > maxPermits {
 				maxPermits = permits
 			}
-			totalSimTime = endAt
+			if endAt > totalSimTime {
+				totalSimTime = endAt
+			}
 			mu.Unlock()
 		})
 	}

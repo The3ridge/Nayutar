@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path"
@@ -61,6 +62,16 @@ func TestLeanBuildIsSeparateFromGoCI(t *testing.T) {
 		if job == "" {
 			t.Error("ci.yml has no go job")
 		} else {
+			hasTimeout20 := false
+			for _, line := range strings.Split(job, "\n") {
+				if stripYAMLComment(line) == "    timeout-minutes: 20" {
+					hasTimeout20 = true
+					break
+				}
+			}
+			if !hasTimeout20 {
+				t.Error("go job must set job-level timeout-minutes: 20")
+			}
 			if !strings.Contains(job, "go vet ./...") {
 				t.Error("go job must run go vet ./...")
 			}
@@ -186,6 +197,381 @@ func TestVulnerabilityScanIsPinnedAndNotSwallowed(t *testing.T) {
 			t.Errorf("vulncheck job must keep the default text output; %s exits 0 on findings", mode)
 		}
 	}
+}
+
+func TestDependabotPinsContainerdTo23LTS(t *testing.T) {
+	if err := checkDependabotContainerdPin(readRepoFile(t, ".github/dependabot.yml")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckDependabotContainerdPin(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		wantErr bool
+	}{
+		{
+			name: "multiline list under unquoted gomod",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod # Go dependencies
+    directory: /
+    ignore:
+      # Pin containerd to the 2.3 LTS line.
+      - dependency-name: "github.com/containerd/containerd/v2"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+  - package-ecosystem: github-actions
+    directory: /
+`,
+		},
+		{
+			name: "inline list under double-quoted gomod with unrelated ignore rule",
+			content: `version: 2
+updates:
+  - package-ecosystem: "gomod"
+    ignore:
+      - dependency-name: "example.com/other"
+      - dependency-name: 'github.com/containerd/containerd/v2'
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+`,
+		},
+		{
+			name: "single-quoted gomod and unquoted module",
+			content: `version: 2
+updates:
+  - package-ecosystem: 'gomod'
+    ignore:
+      - dependency-name: github.com/containerd/containerd/v2
+        update-types: [version-update:semver-minor, version-update:semver-major]
+`,
+		},
+		{
+			name: "commented out rule",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod
+    ignore:
+      # - dependency-name: "github.com/containerd/containerd/v2"
+      #   update-types:
+      #     - "version-update:semver-major"
+      #     - "version-update:semver-minor"
+`,
+			wantErr: true,
+		},
+		{
+			name: "ignore placed under github-actions instead of gomod",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+  - package-ecosystem: github-actions
+    ignore:
+      - dependency-name: "github.com/containerd/containerd/v2"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+`,
+			wantErr: true,
+		},
+		{
+			name: "dependency-name and update-types split across separate items",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod
+    ignore:
+      - dependency-name: "github.com/containerd/containerd/v2"
+      - update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+`,
+			wantErr: true,
+		},
+		{
+			name: "dependency-name without update-types blocks patches",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod
+    ignore:
+      - dependency-name: "github.com/containerd/containerd/v2"
+`,
+			wantErr: true,
+		},
+		{
+			name: "semver-minor missing",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod
+    ignore:
+      - dependency-name: "github.com/containerd/containerd/v2"
+        update-types:
+          - "version-update:semver-major"
+`,
+			wantErr: true,
+		},
+		{
+			name: "semver-patch included",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod
+    ignore:
+      - dependency-name: "github.com/containerd/containerd/v2"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+`,
+			wantErr: true,
+		},
+		{
+			name: "versions field included",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod
+    ignore:
+      - dependency-name: "github.com/containerd/containerd/v2"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+        versions:
+          - ">= 2.4.0"
+`,
+			wantErr: true,
+		},
+		{
+			name: "partial module name match",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod
+    ignore:
+      - dependency-name: "github.com/containerd/containerd/v2/client"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+`,
+			wantErr: true,
+		},
+		{
+			name: "ignore indented under commit-message",
+			content: `version: 2
+updates:
+  - package-ecosystem: gomod
+    commit-message:
+      prefix: "chore(deps)"
+      ignore:
+        - dependency-name: "github.com/containerd/containerd/v2"
+          update-types: ["version-update:semver-major", "version-update:semver-minor"]
+`,
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkDependabotContainerdPin(tc.content)
+			if tc.wantErr && err == nil {
+				t.Error("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+type dependabotIgnoreItem struct {
+	dependencyName string
+	hasUpdateTypes bool
+	updateTypes    []string
+	hasVersions    bool
+}
+
+func checkDependabotContainerdPin(content string) error {
+	const targetModule = "github.com/containerd/containerd/v2"
+
+	var items []dependabotIgnoreItem
+	var current *dependabotIgnoreItem
+	flushItem := func() {
+		if current != nil {
+			items = append(items, *current)
+			current = nil
+		}
+	}
+
+	inUpdates := false
+	inGomod := false
+	inIgnore := false
+	inUpdateTypes := false
+
+	applyItemField := func(item *dependabotIgnoreItem, key, val string) {
+		inUpdateTypes = false
+		switch key {
+		case "dependency-name":
+			item.dependencyName = unquoteYAML(val)
+		case "versions":
+			item.hasVersions = true
+		case "update-types":
+			item.hasUpdateTypes = true
+			if val == "" {
+				inUpdateTypes = true
+				return
+			}
+			if strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]") {
+				inner := strings.TrimSpace(val[1 : len(val)-1])
+				if inner != "" {
+					for elem := range strings.SplitSeq(inner, ",") {
+						if u := unquoteYAML(elem); u != "" {
+							item.updateTypes = append(item.updateTypes, u)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for rawLine := range strings.SplitSeq(content, "\n") {
+		line := stripYAMLComment(rawLine)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := leadingSpaces(line)
+
+		if indent == 0 {
+			flushItem()
+			inGomod = false
+			inIgnore = false
+			inUpdateTypes = false
+			inUpdates = line == "updates:"
+			continue
+		}
+		if !inUpdates {
+			continue
+		}
+
+		if strings.HasPrefix(line, "  - ") {
+			flushItem()
+			inGomod = false
+			inIgnore = false
+			inUpdateTypes = false
+			if k, v, ok := strings.Cut(strings.TrimSpace(line[len("  - "):]), ":"); ok {
+				if strings.TrimSpace(k) == "package-ecosystem" && unquoteYAML(v) == "gomod" {
+					inGomod = true
+				}
+			}
+			continue
+		}
+		if indent <= 2 {
+			flushItem()
+			inGomod = false
+			inIgnore = false
+			inUpdateTypes = false
+			continue
+		}
+		if !inGomod {
+			continue
+		}
+
+		if indent == 4 {
+			flushItem()
+			inUpdateTypes = false
+			inIgnore = line == "    ignore:"
+			continue
+		}
+		if !inIgnore {
+			continue
+		}
+
+		if line == "      -" || strings.HasPrefix(line, "      - ") {
+			flushItem()
+			inUpdateTypes = false
+			current = &dependabotIgnoreItem{}
+			if len(line) > len("      - ") {
+				if k, v, ok := strings.Cut(strings.TrimSpace(line[len("      - "):]), ":"); ok {
+					applyItemField(current, strings.TrimSpace(k), strings.TrimSpace(v))
+				}
+			}
+			continue
+		}
+		if current == nil {
+			continue
+		}
+
+		if indent == 8 && !strings.HasPrefix(line[8:], "- ") {
+			if k, v, ok := strings.Cut(line[8:], ":"); ok {
+				applyItemField(current, strings.TrimSpace(k), strings.TrimSpace(v))
+			}
+			continue
+		}
+		if inUpdateTypes && indent >= 8 {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "- ") {
+				if u := unquoteYAML(trimmed[2:]); u != "" {
+					current.updateTypes = append(current.updateTypes, u)
+				}
+			}
+		}
+	}
+	flushItem()
+
+	wantTypes := []string{"version-update:semver-major", "version-update:semver-minor"}
+	found := false
+	for _, item := range items {
+		if item.dependencyName != targetModule {
+			continue
+		}
+		if item.hasVersions {
+			return fmt.Errorf("dependabot gomod ignore item for %s must not specify versions", targetModule)
+		}
+		if !item.hasUpdateTypes {
+			return fmt.Errorf("dependabot gomod ignore item for %s must specify update-types", targetModule)
+		}
+		got := slices.Clone(item.updateTypes)
+		slices.Sort(got)
+		if !slices.Equal(got, wantTypes) {
+			return fmt.Errorf("dependabot gomod ignore update-types for %s = %v, want %v", targetModule, got, wantTypes)
+		}
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("dependabot gomod ignore block missing exact rule for %s", targetModule)
+	}
+	return nil
+}
+
+func stripYAMLComment(line string) string {
+	inSingle, inDouble := false, false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case '#':
+			if !inSingle && !inDouble && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+				return strings.TrimRight(line[:i], " \t\r")
+			}
+		}
+	}
+	return strings.TrimRight(line, " \t\r")
+}
+
+func unquoteYAML(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
+func leadingSpaces(s string) int {
+	n := 0
+	for n < len(s) && s[n] == ' ' {
+		n++
+	}
+	return n
 }
 
 func TestAgentHarnessPostEditChecksAreWired(t *testing.T) {

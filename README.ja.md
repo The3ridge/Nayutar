@@ -2,12 +2,12 @@
 
 [English](README.md) | **日本語**
 
-Nayutar は、**Kubernetes の本格的な代替**を目指すコンテナオーケストレータです。まだ初期の段階です。土台は作って検証してありますが、コンテナを動かす部分はこれから作ります。
+Nayutar は、**Kubernetes の本格的な代替**を目指すコンテナオーケストレータです。まだ初期の段階です。中核のライブラリ群と単一ユニットのコンテナ実行は作って検証してありますが、コントロールプレーンのサーバ、スケジューラ、コントローラはこれから作ります。
 
 > [!IMPORTANT]
-> **Nayutar でワークロードをデプロイすることは、まだできません。** API サーバ、CLI、ノードエージェント、スケジューラはありません。
+> **Nayutar でクラスタにワークロードをデプロイすることは、まだできません。** API サーバの実行ファイル、クラスタ操作用の CLI、スケジューラ、コントローラはありません。
 >
-> いまの Nayutar は Go のライブラリ群です。ストア、テナントの隔離、watch キャッシュ、ノードの障害検知、リソースモデルがあります。Go から呼び出すことと、それらを検証する検査を実行することができます。この README はその手順を示します。
+> いまの Nayutar は Go のライブラリ群（ストア、テナントの隔離、watch キャッシュ、ノードの障害検知、葉パス所有権つきのリソースモデル、HTTP/2 ワイヤ層、シミュレーション境界、containerd の直接駆動、既定拒否の `nftables` ネットワークポリシー）と、手元の `.lkal` ファイルから 1 つのコンテナユニットを動かす `lk-node` です。Go からライブラリを呼び出すことと、それらを検証する検査を実行することができます。この README はその手順を示します。
 
 ## 目次
 
@@ -215,15 +215,17 @@ etcd-v3.6.16-linux-amd64/etcdctl --endpoints=http://127.0.0.1:12379 get --prefix
 /sys/tenants/acme
 /t/acme/o/core/secret/db-creds
 /t/acme/o/core/workload/web
+/t/acme/own/core/secret/db-creds
+/t/acme/own/core/workload/web
 /t/acme/ref/secret/db-creds/workload/web
 ```
 
-テナントが持つものは、すべて `/t/acme/` の下にあります。最後のキーは逆参照索引で、`web` が `db-creds` を参照していることを記録しています。
+テナントが持つものは、すべて `/t/acme/` の下にあります。`o/` がオブジェクト本体、`own/` が同じトランザクションで書かれた葉パスごとの所有権、`ref/` が `web` から `db-creds` への参照を記録する逆参照索引です。
 
 etcd があれば、メンバーを停止させたりネットワークを分断したりする試験も実行できます。
 
 ```sh
-go test -tags etcd ./core/store/... ./core/liveness/ ./core/resource/
+go test -tags etcd ./core/store/... ./core/liveness/ ./core/resource/ ./core/wire/
 ```
 
 ### 4. 仕様を検査する（任意）
@@ -255,6 +257,7 @@ go test -tags drt ./core/drt/...
 | **kind** | リソースの種類です。`workload` や `secret` などがあり、それぞれをスキーマで定義します。 |
 | **封筒** | すべてのリソースに共通の形です。`meta`（識別）、`spec`（望む状態）、`status`（観測した状態）から成ります。 |
 | **参照** | あるオブジェクトから別のオブジェクトを指す、型のついたポインタです。`&secret/db-creds` と書きます。書き込み時に検査され、テナントの外は指せません。 |
+| **葉パス所有権** | `meta/labels` と `spec` の末端の欄ごとに所有者を最大 1 つ記録する仕組みです。`/t/<tenant>/own/...` に分けて保存し、複数のアクターが互いの欄を上書きせずに `apply` や `prune` できるようにします。 |
 | **ストア契約** | すべてのバックエンドが実装するインターフェースです。etcd v3 API から Lease を除いたサブセットで、`memstore` と `etcdstore` が実装しています。 |
 | **DRT** | 差分ランダム試験です。同じランダムな操作を Go のコードと Lean のモデルの両方で実行し、結果が一致することを確かめます。 |
 | **検証ゲート** | プロジェクトの段階です。G0 から G4 まであり、測定できる合格条件を満たすと合格です。 |
@@ -262,7 +265,7 @@ go test -tags drt ./core/drt/...
 
 ## あるものと、まだ無いもの
 
-次のものは、試験つきの Go ライブラリです。どれも、ネットワーク越しの API からはまだ使えません。
+次のものは、試験つきの Go ライブラリと、手元の `.lkal` ファイルから単一のコンテナユニットを動かす `lk-node` です。API サーバの実行ファイルはまだありません。
 
 | 領域 | 何をするか | コード |
 | --- | --- | --- |
@@ -270,16 +273,21 @@ go test -tags drt ./core/drt/...
 | テナントのキー空間 | テナントのキーをすべて 1 つの接頭辞の下に置きます。登録簿が書き込みをフェンスするので、テナントの削除後に届いた書き込みは拒否されます。 | [`core/store/keyspace`](core/store/keyspace)、[`core/store/tenant`](core/store/tenant) |
 | watch キャッシュ | 読み取り、リビジョン指定のスナップショット、watch をメモリから返します。キャッシュはテナントと kind の組ごとに 1 つです。 | [`core/store/watchcache`](core/store/watchcache) |
 | ノードの死活監視 | メモリに持った心拍から故障したノードを検知し、確定した状態の変化だけをストアに書きます。 | [`core/liveness`](core/liveness) |
-| リソースの封筒 | すべてのリソースの形を固定し、意図の書き込みと状態の書き込みを分けます。 | [`core/resource/envelope`](core/resource/envelope) |
-| 参照の検査 | 追加された参照を書き込み時に検査し、オブジェクトと同じトランザクションで書きます。 | [`core/resource/refs`](core/resource/refs) |
-| kind のスキーマ | kind ごとに内容を検査し、既定値を補い、参照の規則を導きます。 | [`core/resource`](core/resource) |
+| リソースの封筒と Patch | すべてのリソースの形（`meta`・`spec`・`status`）を固定し、意図の書き込みと状態の書き込みを分け、両方の入口に対するパス単位の Patch と Diff を備えます。 | [`core/resource/envelope`](core/resource/envelope)、[`core/resource/patch`](core/resource/patch) |
+| kind のスキーマと順序付き集合 | LKAL v0.2 スキーマで kind ごとに内容を検査し、既定値を補い、参照の規則を導き、順序付きレコード集合（`order` 葉）を検査します。 | [`core/resource`](core/resource)、[`core/resource/orderedset`](core/resource/orderedset) |
+| 参照の検査 | 追加された参照（および任意の Cedar ポリシー）を書き込み時に検査し、オブジェクト本体および逆参照索引と同じトランザクションで書きます。 | [`core/resource/refs`](core/resource/refs)、[`core/resource/refcedar`](core/resource/refcedar) |
+| 葉パス所有権 | 葉パスごとの所有権を圧縮トライとして `/t/<tenant>/own/...` に格納し、本体・所有権・逆参照を 1 回の CAS トランザクションで更新します（`apply`・`prune`・`adopt`・`release`・`explain`）。 | [`core/resource/ownership`](core/resource/ownership)、[`core/resource`](core/resource) |
+| HTTP/2 ワイヤ層 | リソース、Patch、所有権サブリソースの読み書きと watch を、単一行 LKAL-JSON の HTTP/2（`h2` と prior-knowledge `h2c`）で扱うハンドラと Go クライアントです。 | [`core/wire`](core/wire) |
+| ノードのコンテナ実行 | CRI と `PodSandbox` を使わず containerd v2.3 を直接駆動し、Linux `netns` と CNI プラグインの連鎖を管理し、失敗時は逆順（LIFO）で解放します。 | [`core/node`](core/node)、[`cmd/lk-node`](cmd/lk-node) |
+| 既定拒否のネットワークポリシー | `br_netfilter` に頼らずテナント別ブリッジ（`nbr-*`）でテナントを分け、異テナント間は送信・受信の双方向許可を求め、`nft -f -` で `nftables` の規則（送信元・ブリッジ族・ホスト入力のガードを含む）を原子的に適用します。 | [`core/netpol`](core/netpol) |
+| シミュレーション境界 | 時計・通信・ディスク・乱数を `core/sim` のインターフェースに通し（AST 検査で強制）、決定論的イベントキューで複数サブシステムの障害シナリオを再生します。 | [`core/sim`](core/sim)、[`core/sim/clustersim`](core/sim/clustersim) |
 
 まだ作っていないもの：
 
-- **API サーバと CLI。** 宣言をネットワーク越しに送る手段はありません。
-- **欄ごとの所有権**と `apply`・`prune`。複数のアクターが 1 つのオブジェクトを編集するためのものです。
-- **ノードエージェント**：containerd によるコンテナの実行、ネットワーク、ストレージ、ネットワークポリシー。
-- **スケジューラとコントローラ。**
+- **API サーバの実行ファイル、認証、クラスタ操作用の CLI。** HTTP/2 のハンドラとクライアント（`core/wire`）および手元の `.lkal` ファイルを読む `lk-node` はありますが、コントロールプレーンのサーバ実行ファイル、クライアント認証、`/x/` へのスキーマ保存、CLI はまだありません。
+- **テナント間の `Export` と `Binding`**（`identityHash` の検証つき）と、コントローラの読み取り範囲の制限。
+- **スケジューラ、ワークロードの kind、コントローラ**（および終端状態到達性の証明）、ならびに `lk-node` とコントロールプレーンの接続。
+- **ノードのストレージ（`CSI Node`）、複数コンテナでの `netns` 共有、複数ノード間の経路制御。**
 - **YAML の取り込み**：Helm チャート、Kubernetes のマニフェスト、Compose ファイル。
 
 ## 検証のしかた
@@ -288,10 +296,11 @@ Nayutar は、1 人の開発者が AI コーディングエージェントと一
 
 | 検査 | 内容 | いまの範囲 |
 | --- | --- | --- |
-| **Lean 4 の証明** | 中核の状態機械のモデルを [`spec/`](spec) に置き、それについての定理を証明します。 | 34 定理 |
-| **差分ランダム試験** | ランダムな操作を Go のコードと Lean のモデルの両方で実行し、各ステップの結果を比べます。 | 7 スイート、既定で各 1,000 ケース |
-| **線形化可能性検査と障害の注入** | 実物の 3 メンバー etcd クラスタで、メンバーの停止、過半数の喪失、ネットワークの分断を起こしながら、操作の履歴を検査します。 | ストア、watch キャッシュ |
-| **決定論的シミュレーション** | シードを固定したイベントキューで、複数の障害が重なるシナリオを再生します。 | ノードの死活監視：19 シナリオ |
+| **Lean 4 の証明** | 中核の状態機械のモデルを [`spec/`](spec) に置き、それについての定理を証明します。 | 88 定理 |
+| **差分ランダム試験** | ランダムな操作を Go のコードと Lean のモデルの両方で実行し、各ステップの結果を比べます。 | 12 スイート、既定で各 1,000 ケース |
+| **線形化可能性検査と障害の注入** | 実物の 3 メンバー etcd クラスタで、メンバーの停止、過半数の喪失、ネットワークの分断を起こしながら、操作の履歴を検査します。 | ストア、watch キャッシュ、ノード登録簿、リソースのオブジェクト、HTTP/2 ワイヤ層 |
+| **決定論的シミュレーション** | `core/sim` を通してシード固定のイベントキュー上で複合障害シナリオを再生し、同一シード 100 回実行でのトレースハッシュ一致を確かめます。 | クラスタ結合（`clustersim`）、ノードの死活監視（`livesim`）、ノードライフサイクル（`nodesim`） |
+| **実カーネル・ランタイム結合試験** | CI の Linux 上で実物の `containerd` v2.3 + `runc`、Linux `netns`、CNI ブリッジ、`nftables`（送信元詐称・ブリッジ内 L2・ホスト入力ガードを含む）を動かして確かめます。 | ノード実行（`containerd`）、ネットワークポリシー（`nftables`） |
 | **Kubernetes をオラクルにする** | 振る舞いを Kubernetes v1.37 と比べます。 | これから |
 
 エージェントは証明を書けますが、定理の主張は書けません。[`scripts/agent-harness/`](scripts/agent-harness) のフックが、エージェントによる主張やほかの保護対象のファイルの編集を止めます。
@@ -312,13 +321,17 @@ Nayutar は、1 人の開発者が AI コーディングエージェントと一
 ## ディレクトリ構成
 
 ```text
-cmd/                    dev-etcd の起動、保護対象の定理の検査
+cmd/                    dev-etcd の起動、lk-node の単体実行、保護対象の定理の検査
 config/                 LKAL で宣言した開発環境
 core/
   drt/                  Go と Lean の差分ランダム試験
   liveness/             ノードの死活監視：判定、登録簿、シミュレータ
-  resource/             リソースの封筒、kind のスキーマ、参照の検査
+  netpol/               既定拒否のネットワークポリシー、LKAL スキーマ、nftables 適用
+  node/                 containerd v2.3 の直接駆動、Linux netns、CNI 連鎖、シミュレータ
+  resource/             封筒、kind スキーマ、参照検査、順序付き集合、Patch、葉パス所有権
+  sim/                  シミュレーション境界（Clock・Net・Disk・Rand）、イベントキュー、clustersim
   store/                ストア契約、memstore、etcdstore、keyspace、tenant、watchcache
+  wire/                 HTTP/2 LKAL-JSON ハンドラとクライアント
 docs/ADR/               決定記録（日本語）
 scripts/agent-harness/  コーディングエージェント向けのガードのフック
 spec/                   Lean 4 のモデル、定理の主張、証明
@@ -332,7 +345,7 @@ spec/                   Lean 4 のモデル、定理の主張、証明
 
 ## 先行研究と関連プロジェクト
 
-Nayutar は、宣言の [LKAL](https://github.com/Kaikei-e/LKAL)、所有権モデルの [kisage](https://github.com/Kaikei-e/kisage)、決定記録の [DocDag](https://github.com/Kaikei-e/DocDag)、[etcd](https://etcd.io/)、[Lean 4](https://lean-lang.org/) と [`comparator`](https://github.com/leanprover/comparator)、[Cedar](https://github.com/cedar-policy/cedar-go)、[Porcupine](https://github.com/anishathalye/porcupine) の上に成り立っています。
+Nayutar は、宣言の [LKAL](https://github.com/Kaikei-e/LKAL)、所有権モデルの [kisage](https://github.com/Kaikei-e/kisage)、決定記録の [DocDag](https://github.com/Kaikei-e/DocDag)、[etcd](https://etcd.io/)、[containerd](https://containerd.io/)、[CNI](https://www.cni.dev/)、[nftables](https://www.netfilter.org/projects/nftables/)、[Lean 4](https://lean-lang.org/) と [`comparator`](https://github.com/leanprover/comparator)、[Cedar](https://github.com/cedar-policy/cedar-go)、[Porcupine](https://github.com/anishathalye/porcupine) の上に成り立っています。
 
 個々の設計は、次の仕様と研究を参照しています。出典の詳細は決定記録にあります。
 
@@ -345,6 +358,8 @@ Nayutar は、宣言の [LKAL](https://github.com/Kaikei-e/LKAL)、所有権モ�
 | φ accrual 障害検知器 | [Hayashibara ほか、SRDS 2004](https://doi.org/10.1109/RELDIS.2004.1353004)、[Apache Pekko](https://github.com/apache/pekko) |
 | 間接的な確認 | [SWIM、Das ほか、DSN 2002](https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf) |
 | 自分の健全性の認識 | [Lifeguard、Dadgar ほか、2017](https://arxiv.org/abs/1707.00788) |
+| 再現可能な ChaCha8 乱数ストリーム | [C2SP `chacha8rand`](https://c2sp.org/chacha8rand) |
+| 決定論的シミュレーションと障害注入 | [FoundationDB simulation testing](https://apple.github.io/foundationdb/testing.html)、[TigerBeetle VOPR](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/internals/vopr.md)（設計原則の参照だけで、クリーンルームの Go 実装） |
 | コントローラの rely-guarantee 合成 | [Welder](https://doi.org/10.1145/3830418.3843868)（設計原則の参照だけで、コードにもツールチェーンにも依存しません） |
 
 ## ライセンス
