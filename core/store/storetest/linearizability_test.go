@@ -3,6 +3,8 @@ package storetest_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -319,4 +321,146 @@ func TestScopeIsolatesKeysAndShiftsRevisions(t *testing.T) {
 	if len(kvs) != 1 || string(kvs[0].Value) != "x" {
 		t.Fatalf("a scoped test touched a key outside its prefix: %v", kvs)
 	}
+}
+
+type singleCallFailStore struct {
+	store.Store
+	calls *atomic.Int64
+	err   error
+}
+
+func (s singleCallFailStore) failIfSecond() error {
+	if s.calls.Add(1) == 2 {
+		return s.err
+	}
+	return nil
+}
+
+func (s singleCallFailStore) Get(ctx context.Context, key string, atRev store.Rev) (store.KV, store.Rev, error) {
+	if err := s.failIfSecond(); err != nil {
+		return store.KV{}, 0, err
+	}
+	return s.Store.Get(ctx, key, atRev)
+}
+
+func (s singleCallFailStore) Range(ctx context.Context, prefix string, atRev store.Rev, limit int, cont string) ([]store.KV, store.Rev, string, error) {
+	if err := s.failIfSecond(); err != nil {
+		return nil, 0, "", err
+	}
+	return s.Store.Range(ctx, prefix, atRev, limit, cont)
+}
+
+func (s singleCallFailStore) CurrentRev(ctx context.Context) (store.Rev, error) {
+	if err := s.failIfSecond(); err != nil {
+		return 0, err
+	}
+	return s.Store.CurrentRev(ctx)
+}
+
+func (s singleCallFailStore) Txn(ctx context.Context, cmps []store.Cmp, ops []store.Op) (bool, store.Rev, error) {
+	if err := s.failIfSecond(); err != nil {
+		return false, 0, err
+	}
+	return s.Store.Txn(ctx, cmps, ops)
+}
+
+func TestCheckLinearizableSingleClientEarlyErrorDeparture(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		wantErr := errors.New("injected second call error")
+		s := singleCallFailStore{Store: memstore.New(), calls: &atomic.Int64{}, err: wantErr}
+		err := storetest.CheckLinearizable(ctx, s, storetest.Workload{Clients: 4, Ops: 30, Seed: 1})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("CheckLinearizable error = %v, want %v", err, wantErr)
+		}
+		const wantCalls = 1 + 1 + 3*30
+		if got := s.calls.Load(); got != wantCalls {
+			t.Fatalf("total store calls = %d, want %d", got, wantCalls)
+		}
+	})
+}
+
+func TestCheckLinearizableBoundaryResidueLengths(t *testing.T) {
+	if prev := runtime.GOMAXPROCS(0); prev < 2 {
+		runtime.GOMAXPROCS(2)
+		t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+	}
+	for _, ops := range []int{1, 2, 3, 4} {
+		t.Run(fmt.Sprintf("ops=%d", ops), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+				defer cancel()
+				err := storetest.CheckLinearizable(ctx, memstore.New(), storetest.Workload{
+					Clients: 2,
+					Ops:     ops,
+					Seed:    1,
+				})
+				if err != nil {
+					t.Fatalf("CheckLinearizable(ops=%d) = %v, want nil", ops, err)
+				}
+			})
+		})
+	}
+}
+
+func TestCheckLinearizableDegenerateWorkloads(t *testing.T) {
+	t.Run("single client returns sequential error", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			err := storetest.CheckLinearizable(ctx, memstore.New(), storetest.Workload{
+				Clients: 1,
+				Ops:     5,
+				Seed:    1,
+			})
+			if err == nil || errors.Is(err, storetest.ErrNotLinearizable) || !strings.Contains(err.Error(), "effectively sequential") {
+				t.Fatalf("CheckLinearizable(Clients=1, Ops=5) = %v, want sequential-workload error", err)
+			}
+		})
+	})
+	t.Run("zero ops without disrupt", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			err := storetest.CheckLinearizable(ctx, memstore.New(), storetest.Workload{
+				Clients: 4,
+				Ops:     0,
+				Seed:    1,
+			})
+			if err == nil || !strings.Contains(err.Error(), "recorded 0 operations") {
+				t.Fatalf("CheckLinearizable(Clients=4, Ops=0) = %v, want recorded 0 operations error", err)
+			}
+		})
+	})
+	t.Run("zero clients with disrupt", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			err := storetest.CheckLinearizable(ctx, memstore.New(), storetest.Workload{
+				Clients: 0,
+				Ops:     0,
+				Seed:    1,
+				Disrupt: func(context.Context) error { return nil },
+			})
+			if err == nil || !strings.Contains(err.Error(), "recorded 0 operations") {
+				t.Fatalf("CheckLinearizable(Clients=0, Ops=0, Disrupt!=nil) = %v, want recorded 0 operations error", err)
+			}
+		})
+	})
+	t.Run("zero ops with immediate disrupt does not deadlock", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			err := storetest.CheckLinearizable(ctx, memstore.New(), storetest.Workload{
+				Clients: 4,
+				Ops:     0,
+				Seed:    1,
+				Disrupt: func(context.Context) error { return nil },
+			})
+			if err != nil && (errors.Is(err, storetest.ErrNotLinearizable) || (!strings.Contains(err.Error(), "recorded 0 operations") && !strings.Contains(err.Error(), "effectively sequential"))) {
+				t.Fatalf("CheckLinearizable(Clients=4, Ops=0, Disrupt!=nil) = %v, want nil, recorded 0 operations, or effectively sequential", err)
+			}
+		})
+	})
 }

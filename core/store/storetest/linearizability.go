@@ -38,6 +38,7 @@ var ErrNotLinearizable = errors.New("history is not linearizable")
 const (
 	linCheckLimit         = 2 * time.Minute
 	linDisruptCallTimeout = 3 * time.Second
+	linOverlapStride      = 3
 )
 
 var (
@@ -303,6 +304,50 @@ func (c *linClient) learn(in linInput, out linOutput) {
 	}
 }
 
+type partyBarrier struct {
+	mu      sync.Mutex
+	parties int
+	arrived int
+	ch      chan struct{}
+}
+
+func newPartyBarrier(parties int) *partyBarrier {
+	return &partyBarrier{
+		parties: parties,
+		ch:      make(chan struct{}),
+	}
+}
+
+func (b *partyBarrier) arrive() {
+	b.mu.Lock()
+	if b.parties <= 1 {
+		b.mu.Unlock()
+		return
+	}
+	b.arrived++
+	if b.arrived >= b.parties {
+		b.arrived = 0
+		close(b.ch)
+		b.ch = make(chan struct{})
+		b.mu.Unlock()
+		return
+	}
+	ch := b.ch
+	b.mu.Unlock()
+	<-ch
+}
+
+func (b *partyBarrier) depart() {
+	b.mu.Lock()
+	b.parties--
+	if b.parties > 0 && b.arrived >= b.parties {
+		b.arrived = 0
+		close(b.ch)
+		b.ch = make(chan struct{})
+	}
+	b.mu.Unlock()
+}
+
 // CheckLinearizable runs the workload against s, which must hold no keys and
 // have no other writer, and checks the recorded history against the
 // sequential contract. It returns an error wrapping ErrNotLinearizable when
@@ -334,10 +379,11 @@ func CheckLinearizable(ctx context.Context, s store.Store, w Workload) error {
 
 	// A shared counter orders calls and returns. An operation whose return
 	// tick precedes another's call tick really finished before the other
-	// began, which is all the checker may assume. Yielding after the call
-	// tick only widens a recorded interval around the real call, and lets
-	// other clients start theirs inside it even on one CPU.
+	// began, which is all the checker may assume. Syncing at a departure-aware
+	// barrier or yielding after the call tick only widens a recorded interval
+	// around the real call, forcing client intervals to overlap.
 	var clock atomic.Int64
+	barrier := newPartyBarrier(w.Clients)
 	histories := make([][]porcupine.Operation, w.Clients)
 	errs := make([]error, w.Clients)
 	var wg sync.WaitGroup
@@ -345,6 +391,7 @@ func CheckLinearizable(ctx context.Context, s store.Store, w Workload) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer barrier.depart()
 			client := &linClient{id: id, rng: rand.New(rand.NewPCG(w.Seed, uint64(id)))}
 			for calls := 0; ; calls++ {
 				if w.Disrupt == nil {
@@ -372,7 +419,11 @@ func CheckLinearizable(ctx context.Context, s store.Store, w Workload) error {
 				}
 				in := client.next()
 				call := clock.Add(1)
-				runtime.Gosched()
+				if (w.Disrupt == nil && calls%linOverlapStride == 0) || calls == 0 {
+					barrier.arrive()
+				} else {
+					runtime.Gosched()
+				}
 				callCtx := workCtx
 				var callCancel context.CancelFunc
 				if w.Disrupt != nil {
