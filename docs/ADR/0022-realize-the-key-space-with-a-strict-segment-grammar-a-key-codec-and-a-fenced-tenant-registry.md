@@ -1,6 +1,6 @@
 ---
 title: キー空間を、厳格なセグメント文法・キーコーデック・フェンスつきのテナント登録簿で実現する
-status: proposed
+status: accepted
 date: 2026-11-18
 depends-on: ["0004", "0006"]
 ---

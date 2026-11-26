@@ -1,6 +1,6 @@
 ---
 title: 封筒を、小文字の kind・2 つの書き込みの入口・純粋な遷移の核・オブジェクトのストア結合で実現する
-status: proposed
+status: accepted
 date: 2026-11-21
 depends-on: ["0004", "0006", "0009", "0022"]
 ---

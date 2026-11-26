@@ -1,6 +1,6 @@
 ---
 title: watch キャッシュを、永続 B-tree・閉じたリビジョン・プロセス内のコンパクション境界を持つライブラリとして実現する
-status: proposed
+status: accepted
 date: 2026-11-18
 depends-on: ["0007", "0004", "0006", "0017"]
 ---

@@ -712,8 +712,11 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 		"core/wire/wire_etcd_test.go":                    "//go:build etcd",
 		"core/drt/store_drt_test.go":                     "//go:build drt",
 		"core/drt/store_tenant_drt_test.go":              "//go:build drt",
+		"core/drt/keyspace_drt_test.go":                  "//go:build drt",
 		"core/drt/watchcache_drt_test.go":                "//go:build drt",
 		"core/drt/liveness_drt_test.go":                  "//go:build drt",
+		"core/drt/envelope_drt_test.go":                  "//go:build drt",
+		"core/drt/refs_drt_test.go":                      "//go:build drt",
 		"core/drt/orderedset_drt_test.go":                "//go:build drt",
 		"core/drt/patch_drt_test.go":                     "//go:build drt",
 		"core/drt/ownership_drt_test.go":                 "//go:build drt",
@@ -750,6 +753,11 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 			"func TestStoreComparisonDetectsEveryFieldMutation(",
 			"func TestStoreDRTCatchesBrokenImplementations(",
 		},
+		"core/drt/keyspace_drt_test.go": {
+			"func TestKeyspaceMatchesLeanModel(",
+			"func TestKeyspaceCasesReachEveryOutcome(",
+			"func TestKeyspaceComparisonDetectsEveryFieldMutation(",
+		},
 		"core/drt/watchcache_drt_test.go": {
 			"func TestWatchCacheMatchesLeanModel(",
 			"func TestWatchCacheCasesReachEveryOutcome(",
@@ -761,6 +769,18 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 			"func TestLivenessGeneratorCoverage(",
 			"func TestLivenessComparisonDetectsEveryFieldMutation(",
 			"func TestLivenessDRTCatchesBrokenImplementations(",
+		},
+		"core/drt/envelope_drt_test.go": {
+			"func TestEnvelopeMatchesLeanModel(",
+			"func TestEnvelopeCasesReachEveryOutcome(",
+			"func TestEnvelopeComparisonDetectsEveryFieldMutation(",
+			"func TestEnvelopeDRTCatchesBrokenImplementations(",
+		},
+		"core/drt/refs_drt_test.go": {
+			"func TestRefsMatchesLeanModel(",
+			"func TestRefsCasesReachEveryOutcome(",
+			"func TestRefsComparisonDetectsEveryFieldMutation(",
+			"func TestRefsDRTCatchesBrokenImplementations(",
 		},
 		"core/drt/orderedset_drt_test.go": {
 			"func TestOrderedSetMatchesLeanModel(",

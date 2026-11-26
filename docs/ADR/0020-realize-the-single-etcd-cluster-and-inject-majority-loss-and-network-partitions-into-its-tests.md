@@ -1,6 +1,6 @@
 ---
 title: 単一 etcd クラスタを 3 メンバーの試験クラスタ・テナントビュー・相乗り計測で実現し、過半数喪失とネットワーク分断を試験に注入する
-status: proposed
+status: accepted
 date: 2026-11-18
 depends-on: ["0005"]
 supersedes: ["0019"]

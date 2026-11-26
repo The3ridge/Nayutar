@@ -565,6 +565,9 @@ func TestRunModelRejectsUnknownSuite(t *testing.T) {
 	if err == nil {
 		t.Fatal("RunModel accepted unknown suite")
 	}
+	if !strings.Contains(err.Error(), "usage: nayutar-drt") {
+		t.Fatalf("error %q does not contain %q", err.Error(), "usage: nayutar-drt")
+	}
 }
 
 func TestRunModelRejectsMalformedCase(t *testing.T) {
