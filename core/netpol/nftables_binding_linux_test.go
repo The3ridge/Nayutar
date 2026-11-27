@@ -446,3 +446,40 @@ func TestNftablesHostReachesContainerNeighbourDiscovery(t *testing.T) {
 		t.Fatalf("the host must learn a container's neighbour advertisement: %v (%s)", err, out)
 	}
 }
+
+func TestNftablesBridgeBlocksMissingFamilySpoofingOtherTenant(t *testing.T) {
+	if reexecIsolated(t, "TestNftablesBridgeBlocksMissingFamilySpoofingOtherTenant") {
+		return
+	}
+	l := newLab(t)
+	alphaChain := l.chain("alpha", "10.60.0.0/24", "10.60.0.1")
+	betaChain := l.chain("beta", "10.61.0.0/24", "10.61.0.1")
+	a1 := l.endpoint("alpha-1", alphaChain)
+	a2 := l.endpoint("alpha-2", alphaChain)
+	b1 := l.endpoint("beta-1", betaChain)
+	b2 := l.endpoint("beta-2", betaChain)
+
+	a1v6, a2v6 := netip.MustParseAddr("fd00:61::11"), netip.MustParseAddr("fd00:61::12")
+	b1v6, b2v6 := netip.MustParseAddr("fd00:61::21"), netip.MustParseAddr("fd00:61::22")
+	addrInNetns(t, a1.netnsPath, "fd00:61::11/64")
+	addrInNetns(t, a2.netnsPath, "fd00:61::12/64")
+	addrInNetns(t, b1.netnsPath, "fd00:61::21/64")
+	addrInNetns(t, b2.netnsPath, "fd00:61::22/64")
+
+	defer startEchoServerInNetns(t, a2.netnsPath, a2v6, 8080)()
+	defer startEchoServerInNetns(t, b2.netnsPath, b2v6, 8080)()
+	time.Sleep(1500 * time.Millisecond)
+
+	expectDelivered(t, "baseline before policy: IPv6 between alpha-1 and alpha-2 on nbr-alpha", a1, a1v6, a2v6, 8080)
+
+	l.apply(
+		netpol.TenantPolicy{Tenant: "alpha", IntraTenant: netpol.IntraTenantDeny, CIDRs: []netpol.Prefix{mustCIDR(t, "10.60.0.0/24")}},
+		netpol.TenantPolicy{Tenant: "beta", IntraTenant: netpol.IntraTenantAllow, CIDRs: []netpol.Prefix{mustCIDR(t, "10.61.0.0/24"), mustCIDR(t, "fd00:61::/64")}},
+	)
+	if !strings.Contains(l.listTables(), "table bridge nayutar") {
+		t.Fatal("bridge table must be installed for this test to mean anything")
+	}
+
+	expectDelivered(t, "control: IPv6 inside allow tenant beta", b1, b1v6, b2v6, 8080)
+	expectBlocked(t, "IPv6 spoofing beta's allow CIDR inside IPv4-only deny tenant alpha", a1, a1v6, a2v6, 8080)
+}

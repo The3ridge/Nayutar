@@ -26,4 +26,4 @@
 
 Lean 側の入口は `spec/Nayutar/Drt.lean` と `spec/Nayutar/Drt/` にある。スイートを足すときは、両方の側とこの表を更新する。
 
-- `netpol` は `Compile` の受理・拒否とエラーコード、`Evaluate` と `EvalNft` の判定に加え、`CompileNft` が作る表の全体を比べる。Lean の `tableText`（`spec/Nayutar/Drt/Netpol.lean`）と Go の `renderNftTable`（`core/drt/netpol_drt_test.go`）が、チェインの順序と名前・基底チェインの印と既定ポリシー・各規則の一致項目（conntrack・送信元・宛先・プロトコル・ポート・アドレス族）と動作（`jump` の行き先まで）を同じ文字列にし、結果 JSON の `nft_table` で突き合わせる。`nftables` のテキスト（`RenderNft`）、ガードのチェイン（`guard_forward`・`guard_input`）、`bridge` ファミリのミラーは DRT の外にあり、実カーネル試験（`nftables_linux_test.go`）だけが確かめる。
+- `netpol` は `Compile` の受理・拒否とエラーコード、`Evaluate` と `EvalNft` の判定に加え、`CompileNft` が作る表の全体を比べる。Lean の `tableText`（`spec/Nayutar/Drt/Netpol.lean`）と Go の `renderNftTable`（`core/drt/netpol_drt_test.go`）が、チェインの順序と名前・基底チェインの印と既定ポリシー・各規則の一致項目（conntrack・送信元・宛先・プロトコル・ポート・アドレス族）と動作（`jump` の行き先まで）を同じ文字列にし、結果 JSON の `nft_table` で突き合わせる。`nftables` のテキスト（`RenderNft`）、ガードのチェイン（`guard_forward`・`guard_input`）、`bridge` ファミリのミラーは DRT の外にあり、実カーネル試験（`nftables*_linux_test.go`）だけが確かめる。

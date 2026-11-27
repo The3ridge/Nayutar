@@ -1,6 +1,6 @@
 ---
 title: 定理主張の信頼の根をサーバ側でも守り、Lean と DRT のワークフローをすべての変更で走らせる
-status: proposed
+status: accepted
 date: 2026-11-18
 depends-on: ["0017"]
 ---
@@ -62,7 +62,10 @@ GitHub Docs は、公開リポジトリ `github/docs` の `main` にある原文
 - **`lakefile.lean` は `lakefile.toml` より優先される**：`spec/` の複製に、別のライブラリだけを宣言する `lakefile.lean` を足して `lake build`（Lake 5.0.0、Lean 4.35.0）を実行すると、`lakefile.toml` の `defaultTargets` は使われず、`lakefile.lean` の内容でビルドされた。
 - **内部の規則**（`.claude/rules/ci-workflows.md`）：CI の緑は「検査が走って通った」以外の意味を持ってはならない。決定 4 でジョブ内の判定を採らない理由はこれである。
 - **現状の事実**：`scripts/agent-harness/guard_protected_paths.py` の `_is_protected_statement_path` が見るのは `spec/comparator.json`、`spec/Nayutar/Statements.lean`、`spec/Nayutar/Statements/` だけである。`scripts/tests/test-agent-harness.py` は、`spec/Nayutar/Fixture/Register.lean` と `spec/lakefile.toml` への編集が通ることを試験していた。`core/ci_test.go` は、Lean ワークフローが push と pull_request の両方でパスフィルタを持つことを試験していた。
-- **確かめていないこと**：PR の作成者が自分の PR を承認できないことは、GitHub の挙動として知られているが、本 ADR の執筆時に一次資料を開けなかった。決定 5 の最後の項はこの挙動を前提にしている。ルールセットを設定したあとの実際の挙動（必須チェックの名前の一致、Dependabot の PR の扱い）も未確認である。マージキューを使う場合に `merge_group` トリガが要るかどうかも確かめていない。3 つのワークフローはこのトリガを持たない。
+- **PR 作成者の自己承認禁止**（ https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/reviewing-changes-in-pull-requests/about-pull-request-reviews 、2026-11-26 確認）：GitHub Docs は「Pull request authors can't approve their own pull requests」と明記しており、単独保守者でも自分の PR を承認できない。決定 5 の最後の項（単独保守のあいだは承認必須化とコードオーナーのレビュー必須化を要件にしない）はこの仕様に基づく。
+- **マージキューと `merge_group`**（ https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue 、2026-11-26 確認）：マージキューを使う場合、必須ステータスチェックの対象ワークフローには `merge_group`（`types: [checks_requested]`）トリガが要る。現行の 3 ワークフローはこのトリガを持たないため、将来マージキューを導入するときは 3 ワークフローと `core/ci_test.go` の規則を見直す。
+- **Dependabot PR と必須チェック・CODEOWNERS**（ https://docs.github.com/en/code-security/dependabot/working-with-dependabot/automating-dependabot-with-github-actions 、2026-11-26 確認）：Dependabot の PR にも必須ステータスチェックと CODEOWNERS による自動レビュー依頼が適用される（`dependabot.yml` の `reviewers` より CODEOWNERS が推奨されている）。なお Dependabot 起因のワークフローは既定で `GITHUB_TOKEN` が読み取り専用かつ通常の repository secrets へアクセスできない。
+- **確かめていないこと**：ルールセットを設定したあとの実環境での必須チェック名の一致（現行の 3 ワークフローの全ジョブ名との突合）はリポジトリ外の設定であり、ローカルからは機械確認していない。
 
 ## 検討した代替案
 

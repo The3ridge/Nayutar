@@ -446,13 +446,18 @@ var families = []struct {
 	{FamilyIPv6, "ip6", "ipv6", "icmpv6"},
 }
 
-func writeGuardForward(b *strings.Builder, cp *CompiledPolicy) {
-	b.WriteString("  chain " + guardForwardChain + " {\n")
-	b.WriteString("    type filter hook forward priority -10; policy accept;\n")
+func knownTenantBridges(cp *CompiledPolicy) []string {
 	known := make([]string, len(cp.Tenants))
 	for i, t := range cp.Tenants {
 		known[i] = `"` + TenantBridgeName(t.Tenant) + `"`
 	}
+	return known
+}
+
+func writeGuardForward(b *strings.Builder, cp *CompiledPolicy) {
+	b.WriteString("  chain " + guardForwardChain + " {\n")
+	b.WriteString("    type filter hook forward priority -10; policy accept;\n")
+	known := knownTenantBridges(cp)
 	for _, dir := range []string{"iifname", "oifname"} {
 		wild := dir + ` "` + TenantBridgePrefix + `*"`
 		if len(known) == 0 {
@@ -481,6 +486,13 @@ func writeGuardInput(b *strings.Builder, cp *CompiledPolicy) {
 	in := `iifname "` + TenantBridgePrefix + `*"`
 	b.WriteString("  chain " + guardInputChain + " {\n")
 	b.WriteString("    type filter hook input priority 0; policy accept;\n")
+	known := knownTenantBridges(cp)
+	if len(known) == 0 {
+		b.WriteString("    " + in + " drop\n")
+		b.WriteString("  }\n")
+		return
+	}
+	b.WriteString("    " + in + " iifname != { " + strings.Join(known, ", ") + " } drop\n")
 	b.WriteString("    " + in + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept\n")
 	for _, t := range cp.Tenants {
 		br := TenantBridgeName(t.Tenant)
