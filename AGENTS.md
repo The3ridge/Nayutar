@@ -10,7 +10,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
 
 - 動かさない前提：[ADR 0001](docs/ADR/0001-aim-for-a-full-kubernetes-replacement-on-fixed-premises.md)。設計判断はこれに反してはならない。前提を変えるときは 0001 を `supersedes` する ADR を書く。
 - 現状：中核は Go モジュール（言語版の下限は 1.27.3、toolchain は固定しない）、仕様は [`spec/`](spec/) の独立した Lean 4 パッケージ（ADR 0002）。次のものは実装済みである。決定の ADR はどれも `accepted`、矢印の先は実現方式の ADR である。
-  - DRT の枠組み（`core/drt` と Lean の実行ファイル `nayutar-drt`）と定理の主張を守る仕組み：ADR 0017
+  - DRT の枠組み（`core/drt` と Lean の実行ファイル `nayutar-drt`）と定理の主張を守る仕組み：ADR 0017（信頼の根の拡張・CODEOWNERS・ワークフロー常時起動・`main` ルールセットの要件は ADR 0021）
   - ストア契約（`core/store`）とそのインメモリ参照実装・etcd アダプタ・Lean モデル・DRT・線形化可能性検査：ADR 0004。契約は固有の Lean 定理を持たず、Lean モデルを DRT のオラクルとして使う。
   - G0 検証ゲートの合格条件：ADR 0018
   - G0〜G1 を単一の etcd v3.6 クラスタ（3 台）で運用する：ADR 0005 → ADR 0020（ADR 0019 を置き換える）
@@ -25,7 +25,7 @@ Nayutar で作業するコーディングエージェント（Claude Code・Code
   - 葉パス所有権（`core/resource/ownership` と `Objects`・`core/wire` の単一 CAS `Txn` 更新）：ADR 0013 → ADR 0030
   - containerd v2.3 の直接駆動と CNI・netns 管理（`core/node` と `cmd/lk-node`）：ADR 0014 → ADR 0031（CSI Node は後続 ADR）
   - シミュレーション境界の 4 インターフェースと決定論的イベントキュー（`core/sim` と `core/sim/clustersim`）：ADR 0015 → ADR 0032
-  - 既定拒否の `nftables` ネットワークポリシーとテナント別ブリッジ（`core/netpol` と `core/node`）：ADR 0016 → ADR 0033（G2 での `cilium/ebpf` 比較は後続 ADR）。実データプレーンの穴（送信元の詐称・同一ブリッジ内の L2 転送・ホスト宛の通信・設定の組み合わせ）を塞ぐ補強は ADR 0034（`proposed`。ガードとブリッジ族の写像は Lean モデルの外にあり、実カーネルの試験で確かめる）
+  - 既定拒否の `nftables` ネットワークポリシーとテナント別ブリッジ（`core/netpol` と `core/node`）：ADR 0016 → ADR 0033（G2 での `cilium/ebpf` 比較は後続 ADR）。実データプレーンの穴（送信元の詐称・同一ブリッジ内の L2 転送・ホスト宛の通信・設定の組み合わせ）を塞ぐ補強は ADR 0034（ガードとブリッジ族の写像は Lean モデルの外にあり、実カーネルの試験で確かめる）
 - Export と `Binding`、CSI Node、ESR の証明、Kubernetes との差分試験は後続 ADR の範囲であり、まだ実装していない。
 - コードを書き始める前に、その決定を ADR として起票する。
 

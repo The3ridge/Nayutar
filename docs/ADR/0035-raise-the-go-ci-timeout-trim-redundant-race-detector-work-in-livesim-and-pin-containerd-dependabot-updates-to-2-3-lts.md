@@ -1,6 +1,6 @@
 ---
 title: Go CI の時間上限を引き上げ、livesim の重複する race 負荷と直列待ちを削り、Dependabot の containerd 更新を 2.3 LTS に制限する
-status: proposed
+status: accepted
 date: 2026-11-25
 depends-on: ["0008", "0014", "0015", "0021", "0024", "0031", "0032"]
 ---
@@ -40,7 +40,7 @@ depends-on: ["0008", "0014", "0015", "0021", "0024", "0031", "0032"]
 3. **`core/liveness/livesim` の全シナリオを、シードまたは反復単位の並行サブテストに統一する。**
    - シード列を回す全 18 シナリオ（既存の 3 本＋新規変換の 15 本）は、各シードを `t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) { t.Parallel() ... })` で並行実行する。表駆動テスト 2 本（`TestSmallClusterControlPlanePartition` と `TestLoneOwnedNodeControlPlanePartition`）では、各 `tc.name` サブテストの内側に `seed_%d` サブテストを入れ子にし、ケースごとの `t.Cleanup` で集計を検証・記録する。
    - `TestDeterministic` は対象 1 シードについて基準値 `(h0, w0)` と別シード比較を実行したうえで、100 回の反復比較を並行サブテスト `t.Run(fmt.Sprintf("run_%d", run), func(t *testing.T) { t.Parallel() ... })` で実行する。これにより複数コアで壁時計時間を短縮するとともに、複数の `livesim.Sim` インスタンスが可変グローバル状態を共有していないことを `-race` 下でも直接検証できる。
-   - 複数シードにまたがる統計・発火確認の集計は `sync.Mutex` で保護し、全並行サブテスト完了後に実行される `t.Cleanup` で検証・記録する。`t.Cleanup` 内の集計アサーションは `t.Fatalf`（`FailNow` / `runtime.Goexit`）ではなく必ず `t.Errorf` を使う（サブテストを持つ親テストの `t.Cleanup` で `t.Fatalf` を呼ぶと、`testing.tRunner` が `checkRaces` および `report` より前に終了し `--- FAIL:` 診断行が欠落するため）。また、先行するシードサブテストが失敗しているときは `t.Cleanup` で集計アサーションを重ねて原因を曖昧にしない。
+   - 複数シードにまたがる統計・発火確認の集計は `sync.Mutex` で保護し、全並行サブテスト完了後に実行される `t.Cleanup` で検証・記録する。`t.Cleanup` 内の集計アサーションは `t.Fatalf`（`FailNow` / `runtime.Goexit`）ではなく必ず `t.Errorf` を使う（並行サブテストを持つ親テスト（`len(t.sub) > 0`）の `t.Cleanup` で `t.Fatalf` を呼ぶと、`testing.tRunner` が `checkRaces` および `report` より前に終了し `--- FAIL:` 診断行が欠落するため）。また、先行するシードサブテストが失敗しているときは `t.Cleanup` で集計アサーションを重ねて原因を曖昧にしない。
    - シードごとに長さが変わるシミュレーション時刻の記録は、最後の書き込みが勝つ代入ではなく、実行順に依存しない最大値（`max`）で集計する。
 
 4. **`.github/dependabot.yml` の `gomod` 設定に `github.com/containerd/containerd/v2` のマイナー・メジャー更新を除外する規則を置く。**
@@ -64,8 +64,8 @@ depends-on: ["0008", "0014", "0015", "0021", "0024", "0031", "0032"]
   - したがって、`2.3.x` に修正版が無い脆弱性が公開された場合でも、セキュリティ更新の側では `2.4+` への PR が立ちうる。また `ci.yml` の `vulncheck`（`govulncheck`）はシンボル到達可能な脆弱性のみで失敗し、呼び出されないモジュール単位の CVE では失敗しない。さらに `node-containerd` ジョブの `CONTAINERD_VERSION`（`2.3.7`）は Dependabot 管理外の手動ピン留めであるため、`go.mod` が新しい `2.3.x` パッチへ進んでもデーモンバイナリは手動更新するまで従来の `2.3.x` 版のまま留まる（containerd 2.x gRPC API はマイナー版・パッチ版間で互換であることを [[0031]] で確認済み）。
 - **一次資料 URL**：
   - GitHub Actions ワークフロー構文 `jobs.<job_id>.timeout-minutes`（ジョブの最大実行分数）：https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
-  - Dependabot 設定リファレンス `ignore` / `update-types`（`version-update:semver-major`・`version-update:semver-minor`、および `ignore` が version updates を対象とする仕様）：https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
-  - Go 標準ライブラリ `testing` パッケージの並行サブテストと `T.Cleanup`（`t.Cleanup` はすべてのサブテスト完了後に登録逆順で実行される保証、および親テスト `tRunner` における `FailNow` 挙動）：https://pkg.go.dev/testing#hdr-Subtests_and_Sub_benchmarks 、https://pkg.go.dev/testing#T.Cleanup
+  - Dependabot 設定リファレンス `ignore` / `update-types`（`version-update:semver-major`・`version-update:semver-minor`、および `ignore` が version updates を対象とする仕様）：https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+  - Go 標準ライブラリ `testing` パッケージの並行サブテストと `T.Cleanup`（`t.Cleanup` はすべてのサブテスト完了後に登録逆順で実行される保証、および並行サブテストを持つ親テスト `tRunner` における `FailNow` 挙動）：https://pkg.go.dev/testing#hdr-Subtests_and_Sub_benchmarks 、https://pkg.go.dev/testing#T.Cleanup 、https://go.dev/src/testing/testing.go
 
 ## 検討した代替案
 
