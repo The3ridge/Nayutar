@@ -408,3 +408,95 @@ func TestNftablesInputUnboundSourceCannotBounceOffHost(t *testing.T) {
 		t.Error("an echo request whose source is outside the tenant's CIDRs must not be answered")
 	}
 }
+
+func TestNftablesInputUnknownTenantBridgeCannotEnterHostConversation(t *testing.T) {
+	if reexecIsolated(t, "TestNftablesInputUnknownTenantBridgeCannotEnterHostConversation") {
+		return
+	}
+	l := newLab(t)
+	l.endpoint("alpha-1", l.chain("alpha", "10.60.0.0/24", "10.60.0.1"))
+	z1 := l.endpoint("stale-1", l.plainChain("stale", "nbr-zzz", "10.99.0.0/24", "10.99.0.1"))
+	o1 := l.endpoint("other-1", l.plainChain("other", "brx0", "172.31.0.0/24", "172.31.0.1"))
+	holdSpoofAddr(t, z1.netnsPath, o1.ip)
+	ipInNetns(t, z1.netnsPath, "route", "add", "172.31.0.1/32", "via", "10.99.0.1", "dev", "eth0")
+
+	var pc net.PacketConn
+	if err := runInNetns(o1.netnsPath, func() error {
+		var lerr error
+		pc, lerr = net.ListenPacket("udp4", net.JoinHostPort(o1.ip.String(), "9999"))
+		return lerr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			_, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = pc.WriteTo([]byte("genuine"), from)
+		}
+	}()
+
+	conv, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.IPv4(172, 31, 0, 1), Port: 40003}, &net.UDPAddr{IP: o1.ip.AsSlice(), Port: 9999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conv.Close() })
+
+	buf := make([]byte, 64)
+	checkGenuine := func(phase string) {
+		t.Helper()
+		if _, err := conv.Write([]byte("hello")); err != nil {
+			t.Fatalf("%s: write: %v", phase, err)
+		}
+		_ = conv.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := conv.Read(buf)
+		if err != nil || string(buf[:n]) != "genuine" {
+			t.Fatalf("%s: genuine reply from other-1 must reach host, got %q (%v)", phase, buf[:max(n, 0)], err)
+		}
+	}
+	sendForged := func() {
+		t.Helper()
+		err := runInNetns(z1.netnsPath, func() error {
+			fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = unix.Close(fd) }()
+			if err := unix.Bind(fd, &unix.SockaddrInet4{Port: 9999, Addr: o1.ip.As4()}); err != nil {
+				return err
+			}
+			return unix.Sendto(fd, []byte("forged"), 0, &unix.SockaddrInet4{Port: 40003, Addr: [4]byte{172, 31, 0, 1}})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	checkGenuine("baseline before policy")
+	sendForged()
+	_ = conv.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := conv.Read(buf)
+	if err != nil || string(buf[:n]) != "forged" {
+		t.Fatalf("baseline before policy: forged datagram from stale bridge must reach host, got %q (%v)", buf[:max(n, 0)], err)
+	}
+
+	l.apply(netpol.TenantPolicy{Tenant: "alpha", CIDRs: []netpol.Prefix{mustCIDR(t, "10.60.0.0/24")}})
+	checkGenuine("with tenant policy")
+	sendForged()
+	_ = conv.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
+	if n, err := conv.Read(buf); err == nil {
+		t.Errorf("forged datagram from unknown bridge nbr-zzz must not enter host conversation, read %q", buf[:n])
+	}
+
+	l.apply()
+	checkGenuine("with zero-tenant policy")
+	sendForged()
+	_ = conv.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
+	if n, err := conv.Read(buf); err == nil {
+		t.Errorf("forged datagram from nbr-zzz under zero-tenant policy must not enter host conversation, read %q", buf[:n])
+	}
+}

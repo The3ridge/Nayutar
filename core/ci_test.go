@@ -724,6 +724,8 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 		"core/drt/netpol_drt_test.go":                    "//go:build drt",
 		"core/node/containerd_linux_test.go":             "//go:build linux && containerd",
 		"core/netpol/nftables_linux_test.go":             "//go:build linux && nftables",
+		"core/netpol/nftables_binding_linux_test.go":     "//go:build linux && nftables",
+		"core/netpol/nftables_input_linux_test.go":       "//go:build linux && nftables",
 		"core/drt/store_etcd_drt_test.go":                "//go:build drt && etcd",
 	} {
 		firstLine, _, _ := strings.Cut(readRepoFile(t, rel), "\n")
@@ -814,6 +816,32 @@ func TestStoreChecksRunAgainstPinnedEtcd(t *testing.T) {
 		},
 		"core/netpol/nftables_linux_test.go": {
 			"func TestNftablesDefaultDenyAndMutualAllow(",
+			"func TestNftablesIntraTenantDenyDualStack(",
+			"func TestNftablesSourceSpoofIsBlocked(",
+			"func TestNftablesHostInputGuard(",
+			"func TestNftablesBridgeTableLifecycle(",
+		},
+		"core/netpol/nftables_binding_linux_test.go": {
+			"func TestNftablesBridgeBindingBlocksL2Forgery(",
+			"func TestNftablesBridgeNetfilterRefused(",
+			"func TestNftablesHostInputEchoIsBoundToTheTenantGateway(",
+			"func TestNftablesUnknownTenantBridgeCannotForward(",
+			"func TestNftablesDeliveryIsBoundToTheTenantBridge(",
+			"func TestNftablesUnrelatedBridgeStaysUntouchedByTheBridgeTable(",
+			"func TestNftablesNonTenantInterfaceCannotInjectTenantSource(",
+			"func TestNftablesFamilyWithoutCIDRCannotForward(",
+			"func TestNftablesHostReachesContainerNeighbourDiscovery(",
+			"func TestNftablesBridgeBlocksMissingFamilySpoofingOtherTenant(",
+		},
+		"core/netpol/nftables_input_linux_test.go": {
+			"func TestNftablesInputEchoReflectionAcrossTenantsIsBlocked(",
+			"func TestNftablesInputForgedReplyCannotEnterHostConversation(",
+			"func TestNftablesHostReachesItsOwnGatewayOverLoopback(",
+			"func TestNftablesInputNonTenantInterfaceCannotReflectIntoTenant(",
+			"func TestNftablesInputKeepsIPv6NeighbourDiscoveryAndGatewayPing(",
+			"func TestNftablesBridgeDropsRogueRouterAdvertisement(",
+			"func TestNftablesInputUnboundSourceCannotBounceOffHost(",
+			"func TestNftablesInputUnknownTenantBridgeCannotEnterHostConversation(",
 		},
 	} {
 		body := readRepoFile(t, rel)

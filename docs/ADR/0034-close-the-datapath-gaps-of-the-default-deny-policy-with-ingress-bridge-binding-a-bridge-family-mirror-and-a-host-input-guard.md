@@ -1,6 +1,6 @@
 ---
 title: 既定拒否ポリシーの実データプレーン上の穴を、入口ブリッジへの送信元束縛・ブリッジ族への写像・ホスト入力ガードで塞ぐ
-status: proposed
+status: accepted
 date: 2026-11-24
 depends-on: ["0006", "0016", "0025", "0031", "0032", "0033"]
 ---
@@ -36,8 +36,8 @@ depends-on: ["0006", "0016", "0025", "0031", "0032", "0033"]
    - ブリッジ族の `ct state` はカーネルの `nf_conntrack_bridge` を要する。無い環境ではバッチの適用が失敗し、`lk-node` はコンテナを起動しない（fail-closed）。
 
 3. **ホスト入力ガード `guard_input` を `table inet nayutar` に置く。**
-   - `type filter hook input priority 0; policy accept;` とし、`iifname "nbr-*"` から来たものだけを対象にする。`ct state { established, related }` と ICMPv6 の近隣探索（NS・NA・RS）を `accept` し、echo-request は「`nbr-<T>` から来て、宛先が T の CIDR にある」ものだけを `accept` し、残りを `drop` する。コンテナが ping できるホストのアドレスは、自分のテナントのゲートウェイだけになる。
-   - `ct state` の規則より前に、送信元を束縛する。`nbr-<T>` から来て送信元が T の CIDR に無いもの（T がその族の CIDR を持たないときはその族すべて）を `drop` する。送信元が T の CIDR にあるのに、`nbr-<T>` でもループバックでもないインターフェースから来たものも `drop` する。束縛が無いと、コンテナが他テナントのアドレスを送信元にして自分のゲートウェイへ echo を打ち、ホストの応答を他テナントへ反射させられる。ホストが始めた通信への偽の応答も届く。近隣探索はリンクローカルや未指定の送信元を使うので、束縛より前に `accept` する。
+   - `type filter hook input priority 0; policy accept;` とし、`iifname "nbr-*"` から来たものだけを対象にする。最初に束に無い `nbr-*` ブリッジを `drop` する（テナントが 0 個なら `iifname "nbr-*" drop` のみで終了し、束から外したテナントの残存コンテナが近隣探索や `ct state` に到達する経路を閉じる）。既知のブリッジについては `ct state { established, related }` と ICMPv6 の近隣探索（NS・NA・RS）を `accept` し、echo-request は「`nbr-<T>` から来て、宛先が T の CIDR にある」ものだけを `accept` し、残りを `drop` する。コンテナが ping できるホストのアドレスは、自分のテナントのゲートウェイだけになる。
+   - `ct state` の規則より前に、送信元を束縛する。`nbr-<T>` から来て送信元が T の CIDR に無いもの（T がその族の CIDR を持たないときはその族すべて）を `drop` する。送信元が T の CIDR にあるのに、`nbr-<T>` でもループバックでもないインターフェースから来たものも `drop` する。束縛が無いと、コンテナが他テナントのアドレスを送信元にして自分のゲートウェイへ echo を打ち、ホストの応答を他テナントへ反射させられる。ホストが始めた通信への偽の応答も届く。近隣探索はリンクローカルや未指定の送信元を使うので、既知のテナントブリッジに限って束縛より前に `accept` する。
    - テナントのブリッジ以外から来るホスト宛の通信には、上の「テナントの送信元を名乗るもの」を除いて触れない。ループバックを除くのは、ホストが自分のゲートウェイアドレスと話す通信がループバックを通るからである。
 
 4. **`lk-node` の設定を fail-closed にする。**
@@ -48,7 +48,7 @@ depends-on: ["0006", "0016", "0025", "0031", "0032", "0033"]
 5. **配備前検査を `Enforcer` とスキーマ復号の境界に置く。**
    - テナントの CIDR に全域（`/0`）と IPv4 射影 IPv6（`::ffff:0:0/96` の内側）を認めない。束の中でブリッジ名が衝突するテナントの組を認めない。
    - Lean の `compile` は変えない。この検査は Lean モデルの外にあり、通った束だけが `compile` に渡る。
-   - `nft` の実行ファイルの検査（[[0033]] 決定 5）を、実行ファイルを置くディレクトリからルートまでの各ディレクトリに広げる。どれも root が所有し、グループとその他に書き込みを許さないことを求める。
+   - `nft` の実行ファイルの検査（[[0033]] 決定 3）を、実行ファイルを置くディレクトリからルートまでの各ディレクトリに広げる。どれも root が所有し、グループとその他に書き込みを許さないことを求める。
 
 6. **`net.nayutar/networkpolicy` kind から `spec.cidrs` を外す。**
    - CIDR の割り当てはノードの運用者が書く束（`netpol.schema.lkal`）だけが持つ。kind が運ぶのは `intraTenant` と許可ルールだけにする。
@@ -89,13 +89,13 @@ depends-on: ["0006", "0016", "0025", "0031", "0032", "0033"]
   - 経路上の送信元詐称、テナントに属さないインターフェースからのテナント送信元の注入、束に無い `nbr-*` ブリッジからの転送、テナント宛のパケットがテナント外の出口へ出る配送、CIDR を持たない族の転送が遮断される。
   - `.deny` のテナントで、遮断と明示許可が IPv4 と IPv6 の両方で期待どおりになる。無関係なブリッジ（`nbr-` で始まらない）の L2 転送は `table bridge nayutar` があっても届く。
   - 決定 8 の sysctl のどちらかが 1 なら適用が拒否され、0 に戻すと適用できる。
-  - 各規則を消した変異版では対応する試験が落ちる。実カーネルの試験で差が出なかったのは、他の規則が先に同じ結果を出す重ねがけの防御である（IPv4・IPv6 以外の EtherType の `drop`、ブリッジ族の「CIDR を持たない族」の `drop`）。これらは描画結果の試験だけが固定している。
+  - 各規則を消した変異版では対応する試験が落ちる。IPv4・IPv6 以外の EtherType の `drop`（末尾の無条件 `drop` でも落ちる）は描画結果の試験（`render_test.go`）で固定している。ブリッジ族の「CIDR を持たない族」の `drop`（IPv4 のみの `.deny` テナントと IPv6 を持つ別テナントが同居するとき、他テナントの写像チェインへすり抜けるのを防ぐ必須の規則）および `guard_input` の未知 `nbr-*` 遮断については、描画結果の試験に加え実カーネル試験 2 本（`TestNftablesBridgeBlocksMissingFamilySpoofingOtherTenant`・`TestNftablesInputUnknownTenantBridgeCannotEnterHostConversation`、計 23 本）と `core/ci_test.go` での全 3 ファイル監視を追加した（追加 2 本の実カーネル動作は `-tags nftables` のコンパイル・静的検査を手元で通し、実カーネル実行は CI の `netpol-nftables` で確かめる）。
   - CI の Ubuntu 24.04 が持つ `nft` 1.0.9 では実行していない。`iifname "nbr-*"` と、インターフェース名の匿名集合を使う。受理されるかは CI の `netpol-nftables` が確かめる。
 - **一次資料**：
   - ブリッジ族の接続追跡は Linux 5.3 以降で使える（https://wiki.nftables.org/wiki-nftables/index.php/Bridge_filtering ）。
   - `nft -f` は入力全体を 1 つのトランザクションで適用する（https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement ）。複数のテーブルを 1 つのバッチに入れても同じである。
   - `meta ibrname`・`iifname`・`ether type`・`icmpv6 type` の構文は `nft(8)`（https://www.netfilter.org/projects/nftables/manpage.html ）に従い、上の実測で受理を確かめた。
-  - CNI `bridge` の `portIsolation` は、コンテナ同士の直接の通信を止めてゲートウェイ経由だけにする（https://www.cni.dev/plugins/current/main/bridge/ ）。代替案の評価に使った。
+  - CNI `bridge` の `portIsolation` は、隔離ポート同士のブリッジ内 L2 直接通信を遮断する（https://www.cni.dev/plugins/current/main/bridge/ 。同一サブネット通信をゲートウェイ経由へ折り返すには代理 ARP・代理 NDP が別途要る）。代替案の評価に使った。
   - containerd の既定 spec が与える capability の一覧に `CAP_NET_RAW` がある（https://github.com/containerd/containerd/blob/main/pkg/oci/spec.go ）。
 
 ## 検討した代替案
@@ -113,7 +113,7 @@ depends-on: ["0006", "0016", "0025", "0031", "0032", "0033"]
 - **得るもの**：送信元の詐称（経路上とブリッジ内の両方）・同一ブリッジ内の L2 転送・ホスト宛の通信・設定の組み合わせに対して、[[0016]] の既定拒否が実カーネルで成り立つ。結果が変わる `br_netfilter` の状態では適用そのものを拒否する。保護定理の主張は変えない。
 - **失うもの**：`.deny` を使う構成は `nf_conntrack_bridge` を要し、そのテナントのブリッジ内転送に接続追跡がかかる。`unit.tenant` と任意のブリッジ名の組み合わせは使えなくなる。コンテナからホストのサービスへは、自分のゲートウェイへの ping を除いて届かなくなる。`br_netfilter` を読み込んで sysctl を 1 にする他のソフトウェア（Docker や kube-proxy の既定の構成）と同じノードでは、sysctl を 0 にしない限り `lk-node` が起動しない。
 - **引き受けるリスク**：ガードとブリッジ族の前置部は Lean の証明の外にあり、正しさは実カーネルの試験に頼る。CI の実行環境に `nf_conntrack_bridge` が無いと、`.deny` の試験が失敗する。決定 8 の検査は適用の時点だけなので、その後に `br_netfilter` が読み込まれると、決定 8 に書いた通信の停止が起きる（遮断が緩む方向ではない）。
-- **今後の検証ゲート**：`nftables_linux_test.go`・`nftables_binding_linux_test.go`・`nftables_input_linux_test.go` の実カーネル試験（`.deny` の遮断と明示許可、経路上とブリッジ内の送信元詐称、偽の応答、ARP 汚染による横取り、ホスト入力、束に無いブリッジ、配送の束縛、決定 8 の拒否）を、CI の `netpol-nftables` で毎回実行する。複数ノード化とコントローラの ADR で、決定 6・7 の残りを扱う。
+- **今後の検証ゲート**：`nftables_linux_test.go`・`nftables_binding_linux_test.go`・`nftables_input_linux_test.go` の実カーネル試験 23 本（`.deny` の遮断と明示許可、経路上とブリッジ内の送信元詐称、`.deny` ブリッジ内の未割当アドレス族詐称、偽の応答、ARP 汚染による横取り、ホスト入力と未知 `nbr-*` 遮断、束に無いブリッジ、配送の束縛、決定 8 の拒否）を `core/ci_test.go` で監視し、CI の `netpol-nftables` で毎回実行する。複数ノード化とコントローラの ADR で、決定 6・7 の残りを扱う。
 
 ## 関連ADR
 

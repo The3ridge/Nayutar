@@ -70,6 +70,7 @@ table inet nayutar {
   }
   chain guard_input {
     type filter hook input priority 0; policy accept;
+    iifname "nbr-*" iifname != { "@A@", "@B@" } drop
     iifname "nbr-*" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
     iifname "@A@" ip saddr != { 10.40.0.0/24 } drop
     iifname "@A@" ip6 saddr != { fd00:40::/64 } drop
@@ -473,6 +474,10 @@ func TestRenderNftZeroTenantsDropsEveryTenantBridge(t *testing.T) {
 		if !strings.Contains(got, want+"\n") {
 			t.Fatalf("missing %q:\n%s", want, got)
 		}
+	}
+	wantInput := "  chain guard_input {\n    type filter hook input priority 0; policy accept;\n    iifname \"nbr-*\" drop\n  }\n"
+	if !strings.Contains(got, wantInput) {
+		t.Fatalf("zero-tenant guard_input must drop every nbr-* bridge immediately:\n%s", got)
 	}
 }
 
